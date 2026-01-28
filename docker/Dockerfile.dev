@@ -1,0 +1,28 @@
+# SeatSniper Development Dockerfile
+# Includes dev dependencies and hot reload support
+
+FROM node:22-slim
+
+WORKDIR /app
+
+# Install pnpm
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+# Copy package files
+COPY package.json pnpm-lock.yaml* package-lock.json* ./
+COPY tsconfig.json tsup.config.ts ./
+
+# Install all dependencies (including dev)
+RUN if [ -f pnpm-lock.yaml ]; then \
+      pnpm install --frozen-lockfile; \
+    else \
+      npm install; \
+    fi
+
+# Source will be mounted as volume in dev mode
+# COPY src ./src
+
+EXPOSE 3000
+
+# Default command (can be overridden)
+CMD ["npx", "tsx", "watch", "src/index.ts"]

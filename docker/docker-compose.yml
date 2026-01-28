@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  # SeatSniper Application
+  seatsniper:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: seatsniper-app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - LOG_LEVEL=info
+      - DATABASE_URL=postgresql://seatsniper:${DB_PASSWORD:-seatsniper123}@postgres:5432/seatsniper
+      - REDIS_URL=redis://redis:6379
+      - STUBHUB_CLIENT_ID=${STUBHUB_CLIENT_ID}
+      - STUBHUB_CLIENT_SECRET=${STUBHUB_CLIENT_SECRET}
+      - TICKETMASTER_API_KEY=${TICKETMASTER_API_KEY}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
+      - TWILIO_PHONE_NUMBER=${TWILIO_PHONE_NUMBER}
+      - MONITORED_CITIES=portland,seattle
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - seatsniper-network
+
+  # PostgreSQL with TimescaleDB
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: seatsniper-db
+    restart: unless-stopped
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../src/data/migrations:/docker-entrypoint-initdb.d:ro
+    environment:
+      - POSTGRES_USER=seatsniper
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-seatsniper123}
+      - POSTGRES_DB=seatsniper
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U seatsniper -d seatsniper"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - seatsniper-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: seatsniper-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    networks:
+      - seatsniper-network
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  seatsniper-network:
+    driver: bridge

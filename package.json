@@ -1,0 +1,62 @@
+{
+  "name": "seatsniper",
+  "version": "1.0.0",
+  "description": "Ticket intelligence platform for PNW events - monitors StubHub + Ticketmaster, calculates value scores, delivers alerts",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsup",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest",
+    "test:coverage": "vitest --coverage",
+    "test:integration": "vitest --config vitest.integration.config.ts",
+    "lint": "eslint src --ext .ts",
+    "lint:fix": "eslint src --ext .ts --fix",
+    "typecheck": "tsc --noEmit",
+    "db:migrate": "node-pg-migrate up",
+    "db:rollback": "node-pg-migrate down",
+    "docker:up": "docker-compose -f docker/docker-compose.yml up -d",
+    "docker:down": "docker-compose -f docker/docker-compose.yml down"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "cockatiel": "^3.2.1",
+    "dotenv": "^16.4.7",
+    "node-cron": "^3.0.3",
+    "pg": "^8.13.1",
+    "redis": "^4.7.0",
+    "sharp": "^0.34.5",
+    "telegraf": "^4.16.3",
+    "twilio": "^5.4.0",
+    "winston": "^3.17.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "@types/node-cron": "^3.0.11",
+    "@types/pg": "^8.11.10",
+    "@typescript-eslint/eslint-plugin": "^8.21.0",
+    "@typescript-eslint/parser": "^8.21.0",
+    "eslint": "^9.18.0",
+    "nock": "^14.0.0",
+    "node-pg-migrate": "^7.9.1",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  },
+  "keywords": [
+    "tickets",
+    "stubhub",
+    "ticketmaster",
+    "alerts",
+    "value-scoring"
+  ],
+  "author": "",
+  "license": "UNLICENSED",
+  "private": true
+}
