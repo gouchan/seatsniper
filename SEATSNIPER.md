@@ -67,7 +67,20 @@
 - [x] Added health check functionality
 - [x] Created `.env.example` and `.gitignore`
 
+### Phase 6: Security & Code Quality Audit - COMPLETE
+
+#### 2026-01-28 - Full Audit
+- [x] Ran comprehensive security audit (OWASP Top 10, secrets, Docker, infra)
+- [x] Ran code quality & robustness review (all 32 source files)
+- [x] Documented 49 total findings (6 CRITICAL, 14 HIGH, 18 MEDIUM, 11 LOW)
+- [x] Created prioritized 4-sprint remediation plan
+- See detailed findings below in [Security & Code Quality Audit](#security--code-quality-audit)
+
 **Next Steps:**
+- [ ] Sprint 1: Fix 6 CRITICAL issues (SSRF, Docker secrets, SeatGeek secret exposure, error type guard, OAuth race condition, Telegram double-escaping)
+- [ ] Sprint 2: Fix 14 HIGH issues (HTTPS enforcement, PII scrubbing, Redis auth, config validation, resilience policy, rate limiter, etc.)
+- [ ] Sprint 3: Fix 18 MEDIUM issues (cache eviction, startup validation, rate limit notifications, etc.)
+- [ ] Sprint 4: Fix 11 LOW issues + write tests, add graceful shutdown, add correlation IDs
 - [ ] Install dependencies (`npm install`)
 - [ ] Configure environment variables
 - [ ] Start Docker services (`docker-compose up`)
@@ -280,6 +293,104 @@ npm run dev
 
 ---
 
-## References
-- [PRD Document](/Users/robinsonchan/Desktop/SeatSniper_PRD_v3.docx)
-- [Implementation Plan](/.claude/plans/melodic-wondering-stallman.md)
+## Security & Code Quality Audit
+
+**Audit Date:** 2026-01-28
+**Status:** DOCUMENTED -- Awaiting remediation
+**Totals:** 6 CRITICAL, 14 HIGH, 18 MEDIUM, 11 LOW (49 findings)
+
+### CRITICAL (6) -- Must Fix Before Any Deployment
+
+| # | Finding | File | Summary |
+|---|---------|------|---------|
+| C1 | SSRF via seat map URL fetching | `src/venues/seat-map.service.ts` | `fetchSeatMapFromUrl()` accepts any URL from external API responses with no validation. Could fetch internal resources (cloud metadata, localhost services). **Fix:** Validate URLs against domain allowlist. |
+| C2 | Default DB password in production Docker | `docker/docker-compose.yml` | Fallback `DB_PASSWORD:-seatsniper123` with port 5432 exposed. **Fix:** Remove default, require env var explicitly. |
+| C3 | SeatGeek client secret in URL query params | `src/adapters/seatgeek/seatgeek.adapter.ts` | `client_secret` sent as query param, appears in logs and error dumps. **Fix:** Move to request headers. |
+| C4 | SeatGeek error type guard false positive | `src/adapters/seatgeek/seatgeek.types.ts:197-204` | `isSeatGeekError()` matches successful responses too. Checks only `status` + `message` fields which exist on valid data. **Fix:** Check for error-specific shape (`code` field, absence of `meta`). |
+| C5 | OAuth token refresh race condition | `src/adapters/stubhub/stubhub.adapter.ts:140-149` | Concurrent calls both see expired token, both refresh simultaneously, wasting rate-limited calls. **Fix:** Add `refreshPromise` lock so only one refresh runs at a time. |
+| C6 | Telegram MarkdownV2 double-escaping | `src/notifications/telegram/telegram.formatter.ts:49-54` | Manually escaped strings passed through `escapeMarkdown()` again. Every `sendMessage` fails with parse error. Also in `formatFooter` (line 68) and `formatCompact` (line 139). **Fix:** Use escapeMarkdown on raw text OR manual escapes, not both. |
+
+### HIGH (14) -- Fix Before Production
+
+| # | Finding | File | Summary |
+|---|---------|------|---------|
+| H1 | No HTTPS enforcement | All adapters | Adapters follow redirects with no protocol validation. HTTP downgrade could expose credentials. |
+| H2 | pgAdmin hardcoded password | `docker/docker-compose.dev.yml` | Exposes pgAdmin on port 5050 with password `admin123`. |
+| H3 | PII in logs | All notification modules | Phone numbers and Telegram chat IDs logged in plaintext. |
+| H4 | Redis unauthenticated | `docker/docker-compose.yml` | Redis runs without `requirepass`, exposed on port 6379. |
+| H5 | No unhandled rejection handler | `src/index.ts` | Unhandled async errors crash process silently. |
+| H6 | Config PORT coercion to NaN | `src/config/index.ts:19` | `PORT=""` transforms to `0`/`NaN`. Fix: add `.pipe(z.number().int().positive())`. |
+| H7 | DB URL with undefined password | `src/config/index.ts:79` | Produces `postgresql://user:undefined@host` when `DB_PASSWORD` missing. |
+| H8 | Resilience timeout conflict | `src/adapters/base/circuit-breaker.ts:202-205` | 10s outer timeout wraps all 3 retries (~17s needed). Timeout fires mid-retry, masks actual errors. |
+| H9 | Rate limiter goes negative | `src/utils/rate-limiter.ts:80-87` | Concurrent callers all subtract from pool after same `setTimeout`. `waitQueue` field declared but never used. |
+| H10 | Seat map images missing | `src/venues/seat-map.service.ts` | All referenced `.jpg` files don't exist. Feature non-functional, no startup warning. |
+| H11 | URL cache unbounded eviction | `src/venues/seat-map.service.ts:420-424` | Evicts only one entry with no LRU strategy. |
+| H12 | Ticketmaster price semantics | `src/adapters/ticketmaster/ticketmaster.mapper.ts:133-134` | Inconsistent per-ticket vs bundle-total logic between `face` and `total` price types. |
+| H13 | Error stack traces lost | `src/adapters/stubhub/stubhub.adapter.ts:288-327` | `handleError()` creates new Error, discards original stack. Same in Ticketmaster adapter. Fix: use `{ cause: error }`. |
+| H14 | `main()` runs on import | `src/index.ts:290` | No main-module guard. Any test import triggers full app startup. |
+
+### MEDIUM (18)
+
+| # | Finding | File |
+|---|---------|------|
+| M1 | OAuth tokens in plain memory | `src/adapters/stubhub/stubhub.adapter.ts` |
+| M2 | API keys in URL query params | StubHub + Ticketmaster adapters |
+| M3 | Unbounded image buffer cache (DoS) | `src/venues/seat-map.service.ts` |
+| M4 | SQL string concatenation patterns | `src/data/migrations/` |
+| M5 | No rate limiting on notification sends | All notifiers |
+| M6 | SeatGeek adapter has no rate limiter | `src/adapters/seatgeek/seatgeek.adapter.ts` |
+| M7 | SeatGeek bypasses resilience policies | `seatgeek.adapter.ts` (`getVenueSeatMapUrl`, `findVenue`) |
+| M8 | `cityStateMap` type widened | `src/config/index.ts:160-161` |
+| M9 | Telegram escapeMarkdown regex fragile | `telegram.formatter.ts:126` |
+| M10 | Notifier constructors don't guard empty creds | `telegram.notifier.ts:32`, `sms.notifier.ts:33`, `whatsapp.notifier.ts:33` |
+| M11 | `Math.min(...array)` RangeError on large data | `src/services/value-engine/scoring/price-analyzer.ts:138` |
+| M12 | CircuitState magic numbers | `stubhub.adapter.ts:279-281`, `ticketmaster.adapter.ts:235-238` |
+| M13 | TS path aliases won't resolve at runtime | `tsconfig.json:21-28` (tsup not configured for them) |
+| M14 | Row evaluator mutates input param | `src/services/value-engine/scoring/row-evaluator.ts:22` |
+| M15 | DB port exposed to host network | `docker/docker-compose.yml` |
+| M16 | No input length validation | External data handling |
+| M17 | `dist/` tracked in git | `.gitignore` missing `dist/` exclusion |
+| M18 | Ticketmaster date format fragile | `ticketmaster.adapter.ts:140` (`.replace('.000Z', 'Z')`) |
+
+### LOW (11)
+
+| # | Finding | File |
+|---|---------|------|
+| L1 | Missing security headers | Future HTTP server consideration |
+| L2 | Prototype pollution surface | Config merging |
+| L3 | Error messages leak internals | Various adapters |
+| L4 | No lockfile integrity checks | Build pipeline |
+| L5 | No correlation IDs | Request tracing |
+| L6 | SVG injection in seat map overlays | `src/venues/seat-map.service.ts` |
+| L7 | Unused `MAX_SMS_LENGTH` constant | `src/notifications/twilio/sms.formatter.ts:12` |
+| L8 | `console.error` bypasses logger | `src/index.ts:290` |
+| L9 | Deep link URLs not encoded | `src/utils/deep-link-generator.ts:43-54` |
+| L10 | Unused `_notifier` with fake health | `src/index.ts:208` |
+| L11 | No tests exist | Vitest configured but no test files |
+
+### Additional Observations
+
+- **No tests** -- Vitest configured but zero test files written
+- **No graceful shutdown** -- `stop()` doesn't close HTTP clients, timers, or DB connections
+- **No `logs/` directory creation** -- Winston will throw on startup in production if dir missing
+
+### Remediation Plan
+
+| Sprint | Focus | Items |
+|--------|-------|-------|
+| **Sprint 1** | Critical fixes | C1-C6 (SSRF, Docker secrets, SeatGeek secret, error guard, OAuth race, Telegram escaping) |
+| **Sprint 2** | Production readiness | H1-H14 (HTTPS, PII, Redis auth, config, resilience, rate limiter, etc.) |
+| **Sprint 3** | Hardening | M1-M18 (cache, validation, rate limits, type safety, etc.) |
+| **Sprint 4** | Polish & testing | L1-L11 + write tests, graceful shutdown, correlation IDs |
+
+---
+
+## Changelog
+
+### 2026-01-28
+- Ran full security audit (OWASP Top 10, secrets, Docker, infra, dependencies)
+- Ran code quality & robustness review (type safety, error handling, concurrency, resilience)
+- Documented 49 findings across 4 severity levels
+- Created 4-sprint remediation plan
+- Created GitHub repo at github.com/gouchan/seatsniper
+- Added README.md
