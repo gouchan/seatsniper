@@ -200,9 +200,13 @@ export function createResiliencePolicies(
 
   // -------------------------------------------------------------------------
   // Compose Policies
-  // Order: timeout → retry → circuitBreaker → bulkhead
+  // Order: retry → timeout → circuitBreaker → bulkhead
+  //
+  // Timeout is now INSIDE retries so each individual attempt gets the full
+  // timeout budget. Previously the outer timeout wrapped all retries +
+  // backoff delays, causing premature cancellation mid-retry.
   // -------------------------------------------------------------------------
-  const combinedPolicy = wrap(timeoutPolicy, retryPolicy, breaker, bulkheadPolicy);
+  const combinedPolicy = wrap(retryPolicy, timeoutPolicy, breaker, bulkheadPolicy);
 
   return {
     policy: combinedPolicy,

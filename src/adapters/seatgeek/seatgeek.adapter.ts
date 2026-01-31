@@ -15,6 +15,7 @@ import type {
   HealthStatus,
 } from '../base/platform-adapter.interface.js';
 import { createResiliencePolicies, type ResiliencePolicies } from '../base/circuit-breaker.js';
+import { createMinuteRateLimiter, RateLimiter } from '../../utils/rate-limiter.js';
 import type {
   SeatGeekResponse,
   SeatGeekEvent,
@@ -45,6 +46,7 @@ export class SeatGeekAdapter implements IPlatformAdapter {
 
   private resilience: ResiliencePolicies;
   private client: AxiosInstance;
+  private rateLimiter: RateLimiter;
   private isInitialized: boolean = false;
 
   constructor() {
@@ -56,6 +58,11 @@ export class SeatGeekAdapter implements IPlatformAdapter {
       timeoutMs: config.seatgeek.timeout,
     });
     this.circuitBreaker = this.resilience.circuitBreaker;
+
+    // Initialize rate limiter (60 requests per minute)
+    this.rateLimiter = createMinuteRateLimiter(
+      this.config.rateLimit.requestsPerMinute || 60
+    );
 
     this.client = axios.create({
       baseURL: this.config.baseUrl,
@@ -106,6 +113,7 @@ export class SeatGeekAdapter implements IPlatformAdapter {
   // ==========================================================================
 
   async searchEvents(params: EventSearchParams): Promise<NormalizedEvent[]> {
+    await this.rateLimiter.acquire();
     return this.resilience.policy.execute(async () => {
       const searchParams = this.buildSearchParams(params);
 
@@ -172,6 +180,7 @@ export class SeatGeekAdapter implements IPlatformAdapter {
   // ==========================================================================
 
   async getEventListings(platformEventId: string): Promise<NormalizedListing[]> {
+    await this.rateLimiter.acquire();
     return this.resilience.policy.execute(async () => {
       // SeatGeek listings endpoint
       const response = await this.client.get<SeatGeekListingsResponse>(
@@ -206,12 +215,15 @@ export class SeatGeekAdapter implements IPlatformAdapter {
    */
   async getVenueSeatMapUrl(venueId: string): Promise<string | undefined> {
     try {
-      const response = await this.client.get(`/venues/${venueId}`, {
-        params: {
-          client_id: config.seatgeek.clientId,
-          client_secret: config.seatgeek.clientSecret || undefined,
-        },
-      });
+      await this.rateLimiter.acquire();
+      const response = await this.resilience.policy.execute(async () => {
+        return this.client.get(`/venues/${venueId}`, {
+          params: {
+            client_id: config.seatgeek.clientId,
+            client_secret: config.seatgeek.clientSecret || undefined,
+          },
+        });
+      }) as any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
       if (isSeatGeekError(response.data)) {
         return undefined;
@@ -232,15 +244,18 @@ export class SeatGeekAdapter implements IPlatformAdapter {
     seatMapUrl?: string;
   } | undefined> {
     try {
-      const response = await this.client.get('/venues', {
-        params: {
-          client_id: config.seatgeek.clientId,
-          client_secret: config.seatgeek.clientSecret || undefined,
-          q: name,
-          city,
-          per_page: 5,
-        },
-      });
+      await this.rateLimiter.acquire();
+      const response = await this.resilience.policy.execute(async () => {
+        return this.client.get('/venues', {
+          params: {
+            client_id: config.seatgeek.clientId,
+            client_secret: config.seatgeek.clientSecret || undefined,
+            q: name,
+            city,
+            per_page: 5,
+          },
+        });
+      }) as any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
       if (isSeatGeekError(response.data)) {
         return undefined;

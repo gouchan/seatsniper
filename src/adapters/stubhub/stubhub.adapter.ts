@@ -48,6 +48,7 @@ export class StubHubAdapter implements IPlatformAdapter {
   // OAuth state
   private accessToken: string | null = null;
   private tokenExpiry: Date | null = null;
+  private refreshPromise: Promise<void> | null = null;
 
   constructor() {
     // Initialize resilience policies
@@ -144,7 +145,14 @@ export class StubHubAdapter implements IPlatformAdapter {
       !this.tokenExpiry ||
       this.tokenExpiry.getTime() - Date.now() < 60_000
     ) {
-      await this.refreshAccessToken();
+      // Coalesce concurrent refresh calls: only the first caller triggers
+      // the actual refresh; all others await the same promise.
+      if (!this.refreshPromise) {
+        this.refreshPromise = this.refreshAccessToken().finally(() => {
+          this.refreshPromise = null;
+        });
+      }
+      await this.refreshPromise;
     }
   }
 

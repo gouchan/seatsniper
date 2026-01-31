@@ -240,7 +240,7 @@ export class SeatSniperApp {
   }
 
   /**
-   * Stop the monitoring loop
+   * Stop the monitoring loop and clean up all resources
    */
   async stop(): Promise<void> {
     if (!this.isRunning) {
@@ -248,6 +248,25 @@ export class SeatSniperApp {
     }
 
     this.isRunning = false;
+    logger.info('🛑 SeatSniper stopping...');
+
+    // Shut down notifiers
+    const shutdownPromises: Promise<void>[] = [];
+    for (const [name, notifier] of this.notifiers) {
+      if (typeof (notifier as any).stop === 'function') {
+        shutdownPromises.push(
+          (notifier as any).stop().catch((err: Error) => {
+            logger.warn(`Failed to stop notifier ${name}: ${err.message}`);
+          })
+        );
+      }
+    }
+
+    await Promise.allSettled(shutdownPromises);
+
+    this.adapters.clear();
+    this.notifiers.clear();
+
     logger.info('🛑 SeatSniper stopped');
   }
 }
@@ -262,6 +281,32 @@ async function main(): Promise<void> {
   logger.info('═══════════════════════════════════════════');
 
   const app = new SeatSniperApp();
+
+  // --- Unhandled rejection / exception handlers ---
+  process.on('unhandledRejection', (reason: unknown) => {
+    logger.error('Unhandled promise rejection', {
+      error: reason instanceof Error ? reason.message : String(reason),
+      stack: reason instanceof Error ? reason.stack : undefined,
+    });
+  });
+
+  process.on('uncaughtException', (error: Error) => {
+    logger.error('Uncaught exception — shutting down', {
+      error: error.message,
+      stack: error.stack,
+    });
+    app.stop().finally(() => process.exit(1));
+  });
+
+  // --- Graceful shutdown on SIGINT / SIGTERM ---
+  const shutdown = async (signal: string) => {
+    logger.info(`Received ${signal}, shutting down gracefully...`);
+    await app.stop();
+    process.exit(0);
+  };
+
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
 
   try {
     await app.initialize();
