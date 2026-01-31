@@ -25,10 +25,15 @@ const __dirname = path.dirname(__filename);
 // Seat Map Service
 // ============================================================================
 
+const URL_CACHE_MAX_ENTRIES = 50;
+const URL_CACHE_MAX_BYTES = 100 * 1024 * 1024; // 100 MB
+
 export class SeatMapService {
   private registry: SeatMapRegistry;
   private assetsPath: string;
+  /** LRU cache: most recently accessed entries are at the end of iteration order */
   private urlCache: Map<string, Buffer> = new Map();
+  private urlCacheBytes: number = 0;
 
   constructor() {
     this.registry = VENUE_SEAT_MAPS;
@@ -390,10 +395,14 @@ export class SeatMapService {
    * Returns the image buffer for sending via Telegram
    */
   async fetchSeatMapFromUrl(url: string): Promise<Buffer | null> {
-    // Check cache first
-    if (this.urlCache.has(url)) {
+    // Check cache first — on hit, re-insert to mark as most-recently-used
+    const cached = this.urlCache.get(url);
+    if (cached) {
       logger.debug(`[SeatMap] Cache hit for URL: ${url}`);
-      return this.urlCache.get(url) || null;
+      // Move to end (most recent) for LRU ordering
+      this.urlCache.delete(url);
+      this.urlCache.set(url, cached);
+      return cached;
     }
 
     try {
@@ -416,13 +425,20 @@ export class SeatMapService {
         .jpeg({ quality: 85 })
         .toBuffer();
 
-      // Cache for future use (limit cache size)
-      if (this.urlCache.size > 50) {
-        // Remove oldest entries
-        const firstKey = this.urlCache.keys().next().value;
-        if (firstKey) this.urlCache.delete(firstKey);
+      // LRU eviction: remove oldest entries until within limits
+      while (
+        this.urlCache.size >= URL_CACHE_MAX_ENTRIES ||
+        this.urlCacheBytes + processedImage.byteLength > URL_CACHE_MAX_BYTES
+      ) {
+        const oldestKey = this.urlCache.keys().next().value;
+        if (!oldestKey) break;
+        const evicted = this.urlCache.get(oldestKey);
+        if (evicted) this.urlCacheBytes -= evicted.byteLength;
+        this.urlCache.delete(oldestKey);
       }
+
       this.urlCache.set(url, processedImage);
+      this.urlCacheBytes += processedImage.byteLength;
 
       logger.info(`[SeatMap] Successfully fetched and cached seat map from URL`);
       return processedImage;
@@ -475,6 +491,7 @@ export class SeatMapService {
    */
   clearCache(): void {
     this.urlCache.clear();
+    this.urlCacheBytes = 0;
     logger.debug('[SeatMap] URL cache cleared');
   }
 }

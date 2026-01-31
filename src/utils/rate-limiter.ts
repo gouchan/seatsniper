@@ -27,7 +27,8 @@ export class RateLimiter {
   private tokensPerInterval: number;
   private intervalMs: number;
   private lastRefill: number;
-  private waitQueue: Array<() => void> = [];
+  private queue: Array<() => void> = [];
+  private processing: boolean = false;
 
   constructor(config: RateLimiterConfig) {
     this.tokensPerInterval = config.tokensPerInterval;
@@ -50,7 +51,8 @@ export class RateLimiter {
   }
 
   /**
-   * Try to acquire a token immediately
+   * Try to acquire a token immediately (synchronous, no queue).
+   * Safe to call from a single caller; for concurrent use, prefer acquire().
    * @returns true if token was acquired, false otherwise
    */
   tryAcquire(): boolean {
@@ -65,36 +67,52 @@ export class RateLimiter {
   }
 
   /**
-   * Acquire a token, waiting if necessary
-   * @returns Promise that resolves when token is acquired
+   * Acquire a token, waiting if necessary.
+   * Serialized via an internal queue so concurrent callers cannot
+   * race on the token count — each caller is processed one at a time.
    */
   async acquire(): Promise<void> {
-    if (this.tryAcquire()) {
-      return;
-    }
-
-    // Calculate wait time until next token
-    const tokensNeeded = 1 - this.tokens;
-    const waitTime = (tokensNeeded / this.tokensPerInterval) * this.intervalMs;
-
     return new Promise<void>((resolve) => {
-      setTimeout(() => {
-        this.refill();
-        this.tokens -= 1;
-        resolve();
-        this.processQueue();
-      }, waitTime);
+      this.queue.push(resolve);
+      this.drainQueue();
     });
   }
 
   /**
-   * Process any waiting requests
+   * Process queued callers one at a time.
+   * Only one invocation of drainQueue runs at any moment (guarded by
+   * `this.processing`), which eliminates the read-check-subtract race.
    */
-  private processQueue(): void {
-    while (this.waitQueue.length > 0 && this.tryAcquire()) {
-      const next = this.waitQueue.shift();
-      next?.();
-    }
+  private drainQueue(): void {
+    if (this.processing) return;
+    this.processing = true;
+
+    const processNext = (): void => {
+      if (this.queue.length === 0) {
+        this.processing = false;
+        return;
+      }
+
+      this.refill();
+
+      if (this.tokens >= 1) {
+        this.tokens -= 1;
+        const next = this.queue.shift();
+        next?.();
+        // Continue draining synchronously while tokens are available
+        processNext();
+      } else {
+        // Wait until the next token is available, then resume
+        const tokensNeeded = 1 - this.tokens;
+        const waitTime = Math.max(
+          1,
+          (tokensNeeded / this.tokensPerInterval) * this.intervalMs,
+        );
+        setTimeout(processNext, waitTime);
+      }
+    };
+
+    processNext();
   }
 
   /**
