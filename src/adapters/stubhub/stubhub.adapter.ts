@@ -168,11 +168,11 @@ export class StubHubAdapter implements IPlatformAdapter {
     const searchParams = this.buildSearchParams(params);
 
     try {
-      const response = await this.resilience.policy.execute(async () => {
+      const response = (await this.resilience.policy.execute(async () => {
         return this.client.get<StubHubEventResponse>('/catalog/events', {
           params: searchParams,
         });
-      });
+      })) as any;
 
       const events = mapEventsToNormalized(response.data.events || []);
 
@@ -221,12 +221,12 @@ export class StubHubAdapter implements IPlatformAdapter {
     };
 
     try {
-      const response = await this.resilience.policy.execute(async () => {
+      const response = (await this.resilience.policy.execute(async () => {
         return this.client.get<StubHubListingResponse>(
           `/catalog/events/${platformEventId}/listings`,
           { params: listingParams }
         );
-      });
+      })) as any;
 
       const listings = mapListingsToNormalized(
         response.data.listings || [],

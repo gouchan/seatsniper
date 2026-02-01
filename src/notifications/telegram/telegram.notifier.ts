@@ -79,7 +79,7 @@ export class TelegramNotifier implements INotifier {
         message,
         {
           parse_mode: 'MarkdownV2',
-          disable_web_page_preview: false,
+          link_preview_options: { is_disabled: false },
         }
       );
 

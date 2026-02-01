@@ -134,7 +134,7 @@ export class SeatGeekAdapter implements IPlatformAdapter {
       });
 
       return mapEventsToNormalized(events);
-    });
+    }) as Promise<NormalizedEvent[]>;
   }
 
   /**
@@ -202,7 +202,7 @@ export class SeatGeekAdapter implements IPlatformAdapter {
       logger.debug(`[SeatGeek] Found ${listings.length} listings for event ${platformEventId}`);
 
       return mapListingsToNormalized(listings, platformEventId);
-    });
+    }) as Promise<NormalizedListing[]>;
   }
 
   // ==========================================================================

@@ -3,11 +3,11 @@
  * Transforms StubHub API responses to normalized types
  */
 
-import type {
-  NormalizedEvent,
-  NormalizedListing,
+import {
   EventCategory,
-  DeliveryType,
+  type NormalizedEvent,
+  type NormalizedListing,
+  type DeliveryType,
 } from '../base/platform-adapter.interface.js';
 import type { StubHubEvent, StubHubListing } from './stubhub.types.js';
 import { generateDeepLink } from '../../utils/deep-link-generator.js';

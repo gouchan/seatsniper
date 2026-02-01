@@ -14,12 +14,19 @@ import type { IPlatformAdapter } from './adapters/base/platform-adapter.interfac
 
 // Services
 import { ValueEngineService } from './services/value-engine/value-engine.service.js';
+import { MonitorService, type Subscription } from './services/monitoring/monitor.service.js';
 
 // Notifications
 import { TelegramNotifier } from './notifications/telegram/telegram.notifier.js';
+import { TelegramBotService } from './notifications/telegram/telegram.bot.js';
 import { SMSNotifier } from './notifications/twilio/sms.notifier.js';
 import { WhatsAppNotifier } from './notifications/twilio/whatsapp.notifier.js';
 import type { INotifier } from './notifications/base/notifier.interface.js';
+
+// Database
+import { testConnection, closePool } from './data/database.js';
+import * as SubRepo from './data/repositories/subscription.repository.js';
+import * as AlertRepo from './data/repositories/alert.repository.js';
 
 // ============================================================================
 // Application Class
@@ -29,6 +36,8 @@ export class SeatSniperApp {
   private adapters: Map<string, IPlatformAdapter> = new Map();
   private notifiers: Map<string, INotifier> = new Map();
   private valueEngine: ValueEngineService;
+  private monitor: MonitorService | null = null;
+  private telegramBot: TelegramBotService | null = null;
   private isRunning: boolean = false;
 
   constructor() {
@@ -42,6 +51,9 @@ export class SeatSniperApp {
   async initialize(): Promise<void> {
     logger.info('🎯 SeatSniper initializing...');
 
+    // Initialize database (optional — runs without DB too)
+    await this.initializeDatabase();
+
     // Initialize platform adapters
     await this.initializeAdapters();
 
@@ -49,6 +61,27 @@ export class SeatSniperApp {
     await this.initializeNotifiers();
 
     logger.info('✅ SeatSniper initialized successfully');
+  }
+
+  private dbAvailable = false;
+
+  private async initializeDatabase(): Promise<void> {
+    try {
+      const ok = await testConnection();
+      if (ok) {
+        // Ensure MVP tables exist
+        await SubRepo.ensureTable();
+        await AlertRepo.ensureTable();
+        this.dbAvailable = true;
+        logger.info('  ✓ PostgreSQL connected');
+      } else {
+        logger.warn('  - PostgreSQL unavailable (running in-memory only)');
+      }
+    } catch (error) {
+      logger.warn('  - PostgreSQL skipped', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
   }
 
   private async initializeAdapters(): Promise<void> {
@@ -220,7 +253,7 @@ export class SeatSniperApp {
   }
 
   /**
-   * Start the monitoring loop (placeholder for full implementation)
+   * Start the monitoring loop
    */
   async start(): Promise<void> {
     if (this.isRunning) {
@@ -228,15 +261,63 @@ export class SeatSniperApp {
       return;
     }
 
-    this.isRunning = true;
-    logger.info('🚀 SeatSniper started');
+    this.monitor = new MonitorService(
+      this.adapters,
+      this.notifiers,
+      this.valueEngine,
+    );
 
-    // TODO: Implement inventory monitoring loop
-    // This would include:
-    // 1. Polling events from adapters
-    // 2. Scoring listings with ValueEngine
-    // 3. Triggering alerts via notifiers
-    // 4. Storing data in database
+    // Restore persisted subscriptions from database
+    if (this.dbAvailable) {
+      try {
+        const savedSubs = await SubRepo.getActiveSubscriptions();
+        for (const sub of savedSubs) {
+          this.monitor.addSubscription(sub);
+        }
+        if (savedSubs.length > 0) {
+          logger.info(`  ✓ Restored ${savedSubs.length} subscriptions from DB`);
+        }
+      } catch (error) {
+        logger.warn('  - Failed to restore subscriptions from DB', {
+          error: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
+    }
+
+    this.monitor.start();
+
+    // Start Telegram bot for interactive commands
+    if (config.telegram.botToken && this.notifiers.has('telegram')) {
+      try {
+        this.telegramBot = new TelegramBotService(this.monitor);
+        await this.telegramBot.start();
+        logger.info('  ✓ Telegram bot UX active');
+      } catch (error) {
+        logger.warn('  ✗ Telegram bot failed to start', {
+          error: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
+    }
+
+    this.isRunning = true;
+    logger.info('🚀 SeatSniper monitoring started');
+  }
+
+  /**
+   * Get the monitor service (for adding subscriptions, etc.)
+   */
+  getMonitor(): MonitorService | null {
+    return this.monitor;
+  }
+
+  /**
+   * Add a subscription to the monitor
+   */
+  addSubscription(sub: Subscription): void {
+    if (!this.monitor) {
+      throw new Error('Monitor not started. Call start() first.');
+    }
+    this.monitor.addSubscription(sub);
   }
 
   /**
@@ -249,6 +330,18 @@ export class SeatSniperApp {
 
     this.isRunning = false;
     logger.info('🛑 SeatSniper stopping...');
+
+    // Stop Telegram bot
+    if (this.telegramBot) {
+      await this.telegramBot.stop();
+      this.telegramBot = null;
+    }
+
+    // Stop monitor
+    if (this.monitor) {
+      this.monitor.stop();
+      this.monitor = null;
+    }
 
     // Shut down notifiers
     const shutdownPromises: Promise<void>[] = [];
@@ -263,6 +356,9 @@ export class SeatSniperApp {
     }
 
     await Promise.allSettled(shutdownPromises);
+
+    // Close database pool
+    await closePool();
 
     this.adapters.clear();
     this.notifiers.clear();
@@ -315,13 +411,15 @@ async function main(): Promise<void> {
     const health = await app.healthCheck();
     logger.info('Health check:', health);
 
-    // For now, just log status
     logger.info('🎫 SeatSniper MVP ready!');
     logger.info(`   Adapters: ${[...app.getAdapters().keys()].join(', ') || 'none'}`);
     logger.info(`   Notifiers: ${[...app.getNotifiers().keys()].join(', ') || 'none'}`);
     logger.info(`   Cities: ${config.monitoring.cities.join(', ')}`);
 
-    // In production, would call app.start() to begin monitoring
+    // Start monitoring loop
+    await app.start();
+
+    logger.info('🔄 Monitoring loop active. Press Ctrl+C to stop.');
 
   } catch (error) {
     logger.error('Failed to start SeatSniper', {

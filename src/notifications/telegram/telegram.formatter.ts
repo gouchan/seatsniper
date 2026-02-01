@@ -47,13 +47,13 @@ export class TelegramFormatter {
     const scoreEmoji = this.getScoreEmoji(listing.valueScore);
 
     const details = this.escapeMarkdown(
-      `${listing.rank}\\. ${platformBadge} Section ${listing.section}, Row ${listing.row}\n` +
-      `   💰 $${listing.pricePerTicket}/ticket \\(${listing.quantity} avail\\)\n` +
+      `${listing.rank}. ${platformBadge} Section ${listing.section}, Row ${listing.row}\n` +
+      `   💰 $${listing.pricePerTicket}/ticket (${listing.quantity} avail)\n` +
       `   ${scoreEmoji} Value Score: ${listing.valueScore}/100\n` +
       `   📊 ${listing.recommendation}`
     );
 
-    // Deep link is not escaped - Telegram handles URLs specially
+    // Deep link is not escaped - Telegram handles URLs specially in []() syntax
     const buyLink = `   [🛒 Buy Now](${listing.deepLink})`;
 
     return details + '\n' + buyLink;
@@ -65,7 +65,7 @@ export class TelegramFormatter {
   private formatFooter(): string {
     return '\n\n' + this.escapeMarkdown(
       '━━━━━━━━━━━━━━━━━━━━━\n' +
-      '⚠️ Prices subject to change\\. Click links to purchase\\.'
+      '⚠️ Prices subject to change. Click links to purchase.'
     );
   }
 
@@ -121,6 +121,9 @@ export class TelegramFormatter {
   /**
    * Escape special characters for MarkdownV2
    * Characters: _ * [ ] ( ) ~ ` > # + - = | { } . !
+   *
+   * IMPORTANT: Only call this ONCE on raw text. Never pre-escape
+   * characters before passing to this function or they'll be double-escaped.
    */
   escapeMarkdown(text: string): string {
     return text.replace(/[_*[\]()~`>#+=|{}.!\\-]/g, '\\$&');
@@ -136,7 +139,7 @@ export class TelegramFormatter {
     return this.escapeMarkdown(
       `🎫 ${payload.eventName}\n` +
       `📍 ${payload.venueName}\n` +
-      `💰 $${topListing.pricePerTicket} \\| Score: ${topListing.valueScore}\n`
+      `💰 $${topListing.pricePerTicket} | Score: ${topListing.valueScore}\n`
     ) + `[Buy](${topListing.deepLink})`;
   }
 }

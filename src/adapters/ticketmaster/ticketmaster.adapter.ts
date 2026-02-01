@@ -105,12 +105,12 @@ export class TicketmasterAdapter implements IPlatformAdapter {
     const searchParams = this.buildSearchParams(params);
 
     try {
-      const response = await this.resilience.policy.execute(async () => {
+      const response = (await this.resilience.policy.execute(async () => {
         return this.client.get<TicketmasterPagedResponse<TicketmasterEventResponse>>(
           '/events',
           { params: searchParams }
         );
-      });
+      })) as any;
 
       const events = mapEventsToNormalized(
         response.data._embedded?.events || []
@@ -164,11 +164,11 @@ export class TicketmasterAdapter implements IPlatformAdapter {
     try {
       // Note: Ticketmaster's resale offers endpoint structure varies
       // This uses the standard Discovery API offers endpoint
-      const response = await this.resilience.policy.execute(async () => {
+      const response = (await this.resilience.policy.execute(async () => {
         return this.client.get<TicketmasterOffersResponse>(
           `/events/${platformEventId}/offers`
         );
-      });
+      })) as any;
 
       const listings = mapOffersToNormalized(
         response.data.offers || [],

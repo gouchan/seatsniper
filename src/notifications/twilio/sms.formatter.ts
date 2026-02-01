@@ -9,7 +9,7 @@ import type { AlertPayload, TopValueListing } from '../base/notifier.interface.j
 // Constants
 // ============================================================================
 
-const MAX_SMS_LENGTH = 160;  // Single SMS segment
+// Single SMS segment = 160 chars (used in countSegments() method)
 const MAX_TOTAL_LENGTH = 1600; // Maximum total for multi-segment SMS
 
 // ============================================================================

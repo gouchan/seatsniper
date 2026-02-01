@@ -14,6 +14,7 @@ import {
   handleAll,
   ConsecutiveBreaker,
   CircuitState,
+  TimeoutStrategy,
 } from 'cockatiel';
 import { logger } from '../../utils/logger.js';
 
@@ -159,19 +160,20 @@ export function createResiliencePolicies(
   });
 
   retryPolicy.onRetry((event) => {
-    logger.warn(`[${platformName}] Retrying request (attempt ${event.attempt})`, {
+    const reason = event as any;
+    logger.warn(`[${platformName}] Retrying request (attempt ${reason.attempt ?? 'unknown'})`, {
       platform: platformName,
-      attempt: event.attempt,
-      delay: event.delay,
-      error: event.reason?.message,
+      attempt: reason.attempt,
+      delay: reason.delay,
+      error: 'error' in event ? (event as any).error?.message : undefined,
     });
   });
 
   retryPolicy.onGiveUp((event) => {
-    logger.error(`[${platformName}] Giving up after ${event.attempt} attempts`, {
+    const reason = event as any;
+    logger.error(`[${platformName}] Giving up after retries`, {
       platform: platformName,
-      attempts: event.attempt,
-      error: event.reason?.message,
+      error: 'error' in reason ? reason.error?.message : undefined,
     });
   });
 
@@ -189,7 +191,7 @@ export function createResiliencePolicies(
   // -------------------------------------------------------------------------
   // Timeout
   // -------------------------------------------------------------------------
-  const timeoutPolicy = timeout(timeoutMs, 'aggressive');
+  const timeoutPolicy = timeout(timeoutMs, TimeoutStrategy.Aggressive);
 
   timeoutPolicy.onTimeout(() => {
     logger.warn(`[${platformName}] Request timed out after ${timeoutMs}ms`, {
