@@ -3,15 +3,17 @@
  *
  * Provides a conversational UX for managing SeatSniper:
  *   /start     — Onboarding & help
- *   /subscribe — Set up monitoring (city, score, quantity)
- *   /unsub     — Remove subscription
- *   /scan      — One-shot scan of a city
+ *   /subscribe — Set up monitoring (city → quantity → budget → score)
+ *   /unsub     — Remove subscription (with confirmation)
+ *   /scan      — One-shot scan of a city (with typing indicator + timeout)
  *   /status    — Show monitoring status
  *   /settings  — View/edit preferences
+ *   /pause     — Temporarily mute alerts
+ *   /resume    — Resume alerts
  *   /help      — Show commands
  *
- * Seat map images are delivered as part of the alert flow
- * (handled by TelegramNotifier.sendSeatMapImage).
+ * Alert messages include inline action buttons:
+ *   🔕 Mute Event | ⭐ Save | 🔄 Refresh Prices
  */
 
 import { Telegraf, Markup } from 'telegraf';
@@ -27,15 +29,23 @@ import { config } from '../../config/index.js';
 
 interface UserSession {
   /** Step in the subscribe flow */
-  step: 'idle' | 'awaiting_city' | 'awaiting_quantity' | 'awaiting_score';
+  step: 'idle' | 'awaiting_city' | 'awaiting_quantity' | 'awaiting_budget' | 'awaiting_score';
   /** Partially built subscription */
   pendingSub: Partial<Subscription>;
+  /** Cities selected so far (for multi-city selection) */
+  selectedCities: string[];
   /** When this session was created (for TTL expiry) */
   createdAt: number;
 }
 
 /** Sessions expire after 10 minutes of inactivity */
 const SESSION_TTL_MS = 10 * 60 * 1000;
+
+/** Maximum time for a scan operation (45 seconds) */
+const SCAN_TIMEOUT_MS = 45_000;
+
+/** Set of muted event IDs per user (eventPlatformId → Set<userId>) */
+type MutedEvents = Map<string, Set<string>>;
 
 // ============================================================================
 // Telegram Bot Service
@@ -46,13 +56,14 @@ export class TelegramBotService {
   private monitor: MonitorService;
   private sessions: Map<string, UserSession> = new Map();
   private sessionPruneTimer: NodeJS.Timeout | null = null;
-  private ownsBot: boolean;
+  private mutedEvents: MutedEvents = new Map();
   private isRunning = false;
 
   /**
    * @param monitor - The monitoring service to wire commands to
-   * @param existingBot - Optional shared Telegraf instance (to avoid duplicate polling).
-   *                      If omitted, creates a new instance.
+   * @param existingBot - Optional shared Telegraf instance (from TelegramNotifier).
+   *                      If provided, this service registers handlers on it and
+   *                      manages the long-polling lifecycle.
    */
   constructor(monitor: MonitorService, existingBot?: Telegraf) {
     if (!existingBot && !config.telegram.botToken) {
@@ -60,7 +71,6 @@ export class TelegramBotService {
     }
 
     this.bot = existingBot ?? new Telegraf(config.telegram.botToken);
-    this.ownsBot = !existingBot; // Only launch/stop if we created it
     this.monitor = monitor;
     this.registerHandlers();
   }
@@ -75,11 +85,9 @@ export class TelegramBotService {
     const botInfo = await this.bot.telegram.getMe();
     logger.info(`[TelegramBot] Starting @${botInfo.username}`);
 
-    // Use long-polling (webhook can be configured for production)
-    // Only launch if we own the bot instance (not shared with TelegramNotifier)
-    if (this.ownsBot) {
-      void this.bot.launch();
-    }
+    // Always launch long-polling — this is the component that needs updates.
+    // TelegramNotifier only uses bot.telegram.* API calls (no polling needed).
+    void this.bot.launch();
     this.isRunning = true;
 
     // Prune stale sessions every 5 minutes
@@ -95,9 +103,7 @@ export class TelegramBotService {
       this.sessionPruneTimer = null;
     }
     this.sessions.clear();
-    if (this.ownsBot) {
-      this.bot.stop('SIGTERM');
-    }
+    this.bot.stop('SIGTERM');
     this.isRunning = false;
     logger.info('[TelegramBot] Stopped');
   }
@@ -128,6 +134,8 @@ export class TelegramBotService {
     this.bot.command('scan', ctx => this.handleScan(ctx));
     this.bot.command('status', ctx => this.handleStatus(ctx));
     this.bot.command('settings', ctx => this.handleSettings(ctx));
+    this.bot.command('pause', ctx => this.handlePause(ctx));
+    this.bot.command('resume', ctx => this.handleResume(ctx));
     this.bot.help(ctx => this.handleHelp(ctx));
 
     // ---- Callback queries (inline keyboard buttons) ----
@@ -161,14 +169,15 @@ export class TelegramBotService {
       `1\\. /subscribe — Set up your alerts\n` +
       `2\\. /scan — One\\-shot city scan\n` +
       `3\\. /status — Check monitoring\n` +
-      `4\\. /help — All commands\n\n` +
+      `4\\. /pause / /resume — Mute alerts temporarily\n` +
+      `5\\. /help — All commands\n\n` +
       `_Alerts include venue seat maps, value scores, and direct buy links\\._`;
 
     await ctx.reply(welcome, { parse_mode: 'MarkdownV2' });
   }
 
   // ==========================================================================
-  // /subscribe — Interactive subscription setup
+  // /subscribe — Interactive subscription setup (multi-city + budget)
   // ==========================================================================
 
   private async handleSubscribe(ctx: TelegrafContext): Promise<void> {
@@ -182,23 +191,41 @@ export class TelegramBotService {
         userId: chatId,
         channel: 'telegram',
         active: true,
+        paused: false,
+        userTier: 'free',
       },
+      selectedCities: [],
       createdAt: Date.now(),
     });
 
     const cities = config.monitoring.cities;
-    const buttons = cities.map(city => [
-      Markup.button.callback(
-        city.charAt(0).toUpperCase() + city.slice(1),
-        `city:${city}`,
-      ),
-    ]);
 
-    // Add an "All Cities" option
+    // Build multi-select city buttons (two per row for compact layout)
+    const buttons: ReturnType<typeof Markup.button.callback>[][] = [];
+    for (let i = 0; i < cities.length; i += 2) {
+      const row = [
+        Markup.button.callback(
+          cities[i].charAt(0).toUpperCase() + cities[i].slice(1),
+          `city:${cities[i]}`,
+        ),
+      ];
+      if (cities[i + 1]) {
+        row.push(
+          Markup.button.callback(
+            cities[i + 1].charAt(0).toUpperCase() + cities[i + 1].slice(1),
+            `city:${cities[i + 1]}`,
+          ),
+        );
+      }
+      buttons.push(row);
+    }
+
+    // Add "All Cities" and "Done" options
     buttons.push([Markup.button.callback('📍 All Cities', 'city:all')]);
 
     await ctx.reply(
-      '🏙️ Which cities do you want to monitor?\n\n_Select one or tap "All Cities"_',
+      `🏙️ Which cities do you want to monitor?\n\n` +
+      `_Tap cities to select them, then tap "All Cities" for everything\\._`,
       {
         parse_mode: 'MarkdownV2',
         ...Markup.inlineKeyboard(buttons),
@@ -207,27 +234,106 @@ export class TelegramBotService {
   }
 
   // ==========================================================================
-  // /unsub — Remove subscription
+  // /unsub — Remove subscription (with confirmation)
   // ==========================================================================
 
   private async handleUnsub(ctx: TelegrafContext): Promise<void> {
     const chatId = ctx.chat?.id?.toString();
     if (!chatId) return;
 
-    this.monitor.removeSubscription(chatId);
+    // Check if they even have a subscription
+    const subs = this.monitor.getSubscriptions().filter(s => s.userId === chatId);
+    if (subs.length === 0) {
+      await ctx.reply('You don\'t have an active subscription. Use /subscribe to set one up.');
+      return;
+    }
 
-    // Persist to database (best-effort)
-    SubRepo.removeSubscription(chatId).catch(err => {
-      logger.warn('[TelegramBot] Failed to persist unsub', {
+    // Ask for confirmation
+    const buttons = [
+      [
+        Markup.button.callback('❌ Yes, unsubscribe', 'unsub:confirm'),
+        Markup.button.callback('↩️ Keep my alerts', 'unsub:cancel'),
+      ],
+    ];
+
+    await ctx.reply(
+      '⚠️ Are you sure you want to unsubscribe? You\'ll stop receiving deal alerts.\n\n' +
+      '_Tip: Use /pause to mute alerts temporarily instead._',
+      {
+        parse_mode: 'MarkdownV2',
+        ...Markup.inlineKeyboard(buttons),
+      },
+    );
+  }
+
+  // ==========================================================================
+  // /pause — Temporarily mute alerts
+  // ==========================================================================
+
+  private async handlePause(ctx: TelegrafContext): Promise<void> {
+    const chatId = ctx.chat?.id?.toString();
+    if (!chatId) return;
+
+    const paused = this.monitor.pauseSubscription(chatId);
+    if (!paused) {
+      await ctx.reply('No active subscription to pause. Use /subscribe first.');
+      return;
+    }
+
+    // Persist to DB (best-effort)
+    void SubRepo.getSubscriptionByUser(chatId).then(sub => {
+      if (sub) {
+        sub.paused = true;
+        return SubRepo.upsertSubscription(sub);
+      }
+      return undefined;
+    }).catch(err => {
+      logger.warn('[TelegramBot] Failed to persist pause', {
         error: err instanceof Error ? err.message : String(err),
       });
     });
 
-    await ctx.reply('✅ Subscription removed. You will no longer receive alerts.\n\nUse /subscribe to set up again.');
+    await ctx.reply(
+      '⏸️ Alerts paused. Your settings are preserved.\n\n' +
+      'Use /resume when you\'re ready for alerts again.',
+    );
   }
 
   // ==========================================================================
-  // /scan — One-shot city scan
+  // /resume — Resume paused alerts
+  // ==========================================================================
+
+  private async handleResume(ctx: TelegrafContext): Promise<void> {
+    const chatId = ctx.chat?.id?.toString();
+    if (!chatId) return;
+
+    const resumed = this.monitor.resumeSubscription(chatId);
+    if (!resumed) {
+      await ctx.reply('No paused subscription found. Use /subscribe to set one up.');
+      return;
+    }
+
+    // Persist to DB (best-effort)
+    void SubRepo.getSubscriptionByUser(chatId).then(sub => {
+      if (sub) {
+        sub.paused = false;
+        return SubRepo.upsertSubscription(sub);
+      }
+      return undefined;
+    }).catch(err => {
+      logger.warn('[TelegramBot] Failed to persist resume', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+
+    await ctx.reply(
+      '▶️ Alerts resumed! You\'ll start receiving deal notifications again.\n\n' +
+      'Use /status to check monitoring activity.',
+    );
+  }
+
+  // ==========================================================================
+  // /scan — One-shot city scan (with typing + timeout)
   // ==========================================================================
 
   private async handleScan(ctx: TelegrafContext): Promise<void> {
@@ -265,10 +371,19 @@ export class TelegramBotService {
       return;
     }
 
-    await ctx.reply(`🔍 Scanning ${sanitized}... This may take a moment.`);
+    // Show typing indicator so user sees activity
+    await ctx.sendChatAction('typing');
+
+    await ctx.reply(`🔍 Scanning ${sanitized}... This may take up to 30 seconds.`);
 
     try {
-      const result = await this.monitor.scanCity(sanitized);
+      // Race the scan against a timeout
+      const result = await Promise.race([
+        this.monitor.scanCity(sanitized),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Scan timed out — platforms may be slow. Try again later.')), SCAN_TIMEOUT_MS),
+        ),
+      ]);
 
       if (result.events === 0) {
         await ctx.reply(`No events found in ${sanitized} for the next 30 days.`);
@@ -286,10 +401,13 @@ export class TelegramBotService {
         for (const pick of result.topPicks.slice(0, 5)) {
           const l = pick.listing;
           const s = pick.score;
+          // Include buy link for each listing
+          const buyLink = l.deepLink ? ` [Buy](${l.deepLink})` : '';
           response +=
             `\n${this.getScoreEmoji(s.totalScore)} *Score ${s.totalScore}/100*\n` +
             `   ${this.escapeMarkdown(l.section)} Row ${this.escapeMarkdown(l.row)} — ` +
-            `${this.escapeMarkdown(`$${l.pricePerTicket}/ea`)} ${this.escapeMarkdown(`(${l.quantity} avail)`)}\n` +
+            `${this.escapeMarkdown(`$${l.pricePerTicket}/ea`)} ${this.escapeMarkdown(`(${l.quantity} avail)`)}` +
+            `${buyLink}\n` +
             `   _${this.escapeMarkdown(s.reasoning)}_\n`;
         }
       }
@@ -299,10 +417,10 @@ export class TelegramBotService {
       await ctx.reply(response, { parse_mode: 'MarkdownV2' });
     } catch (error) {
       logger.error('[TelegramBot] Scan failed', {
-        city,
+        city: sanitized,
         error: error instanceof Error ? error.message : String(error),
       });
-      await ctx.reply(`❌ Scan failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      await ctx.reply(`❌ ${error instanceof Error ? error.message : 'Scan failed. Try again later.'}`);
     }
   }
 
@@ -311,25 +429,41 @@ export class TelegramBotService {
   // ==========================================================================
 
   private async handleStatus(ctx: TelegrafContext): Promise<void> {
+    const chatId = ctx.chat?.id?.toString();
+    if (!chatId) return;
+
     const status = this.monitor.getStatus();
+
+    // Check this user's subscription status
+    const userSub = this.monitor.getSubscriptions().find(s => s.userId === chatId);
+    let userLine = '👤 You: Not subscribed';
+    if (userSub) {
+      if (userSub.paused) {
+        userLine = '👤 You: ⏸️ Paused';
+      } else {
+        userLine = `👤 You: ✅ Active ${this.escapeMarkdown('(')}${this.escapeMarkdown(userSub.cities.join(', '))}${this.escapeMarkdown(')')}`;
+      }
+    }
 
     const msg =
       `📡 *SeatSniper Status*\n\n` +
+      `${userLine}\n\n` +
       `Running: ${status.running ? '✅' : '❌'}\n` +
       `Tracked Events: ${status.trackedEvents}\n` +
-      `Active Subscriptions: ${status.subscriptions}\n` +
+      `Active Subs: ${status.subscriptions}` +
+      `${status.pausedSubscriptions > 0 ? ` ${this.escapeMarkdown('(')}${status.pausedSubscriptions} paused${this.escapeMarkdown(')')}` : ''}\n` +
       `Alerts Sent: ${status.alertsSent}\n\n` +
       `*Events by Priority:*\n` +
-      `🔴 High \\(<7 days\\): ${status.eventsByPriority.high}\n` +
-      `🟡 Medium \\(<30 days\\): ${status.eventsByPriority.medium}\n` +
-      `🟢 Low \\(>30 days\\): ${status.eventsByPriority.low}\n` +
+      `🔴 High ${this.escapeMarkdown('(<7 days)')}: ${status.eventsByPriority.high}\n` +
+      `🟡 Medium ${this.escapeMarkdown('(<30 days)')}: ${status.eventsByPriority.medium}\n` +
+      `🟢 Low ${this.escapeMarkdown('(>30 days)')}: ${status.eventsByPriority.low}\n` +
       `⚪ Past: ${status.eventsByPriority.past}`;
 
     await ctx.reply(msg, { parse_mode: 'MarkdownV2' });
   }
 
   // ==========================================================================
-  // /settings — View current subscription
+  // /settings — View current subscription (with edit actions)
   // ==========================================================================
 
   private async handleSettings(ctx: TelegrafContext): Promise<void> {
@@ -344,14 +478,20 @@ export class TelegramBotService {
     }
 
     const sub = subs[0];
+    const budgetLine = sub.maxPricePerTicket > 0
+      ? `💰 Max Price: $${sub.maxPricePerTicket}/ticket`
+      : '💰 Max Price: No limit';
+    const statusLine = sub.paused ? '⏸️ Status: Paused' : '✅ Status: Active';
+
     const msg =
       `⚙️ *Your Settings*\n\n` +
       `🏙️ Cities: ${this.escapeMarkdown(sub.cities.join(', '))}\n` +
       `🎯 Min Score: ${sub.minScore}/100\n` +
       `👥 Min Seats Together: ${sub.minQuantity}\n` +
+      `${this.escapeMarkdown(budgetLine)}\n` +
       `📡 Channel: ${sub.channel}\n` +
-      `✅ Active: ${sub.active ? 'Yes' : 'No'}\n\n` +
-      `_Use /subscribe to change or /unsub to remove\\._`;
+      `${statusLine}\n\n` +
+      `_Use /subscribe to change, /pause to mute, or /unsub to remove\\._`;
 
     await ctx.reply(msg, { parse_mode: 'MarkdownV2' });
   }
@@ -363,20 +503,26 @@ export class TelegramBotService {
   private async handleHelp(ctx: TelegrafContext): Promise<void> {
     const msg =
       `🎯 *SeatSniper Commands*\n\n` +
+      `*Setup:*\n` +
       `/subscribe — Set up deal alerts\n` +
-      `/unsub — Remove your subscription\n` +
+      `/unsub — Remove subscription\n` +
+      `/settings — View your preferences\n\n` +
+      `*Monitoring:*\n` +
       `/scan \\[city\\] — Quick scan for deals\n` +
-      `/status — Monitoring status\n` +
-      `/settings — View your preferences\n` +
-      `/help — This message\n\n` +
+      `/status — System status\n` +
+      `/pause — Mute alerts temporarily\n` +
+      `/resume — Resume alerts\n\n` +
       `*How it works:*\n` +
-      `1\\. Subscribe with your city and seat preferences\n` +
+      `1\\. Subscribe with city, seats, budget, and score\n` +
       `2\\. I poll StubHub, Ticketmaster, and SeatGeek\n` +
       `3\\. When high\\-value tickets are found, I send you:\n` +
       `   🗺️ Venue seat map with highlighted section\n` +
       `   💰 Value score and price analysis\n` +
       `   🛒 Direct buy link\n\n` +
-      `_Family\\-friendly: filter by consecutive seats available\\!_`;
+      `*On each alert you can:*\n` +
+      `   🔕 Mute that event\n` +
+      `   🔄 Refresh prices\n\n` +
+      `_Family\\-friendly: filter by seats together and max budget\\!_`;
 
     await ctx.reply(msg, { parse_mode: 'MarkdownV2' });
   }
@@ -394,15 +540,58 @@ export class TelegramBotService {
     const data = ctx.callbackQuery.data;
     await ctx.answerCbQuery(); // Acknowledge button press
 
-    // --- City selection (subscribe flow) ---
+    // --- City selection (subscribe flow, supports multi-select) ---
     if (data.startsWith('city:')) {
       const city = data.replace('city:', '');
       const session = this.sessions.get(chatId);
       if (!session || session.step !== 'awaiting_city') return;
 
-      session.pendingSub.cities = city === 'all'
-        ? [...config.monitoring.cities]
-        : [city];
+      if (city === 'all') {
+        session.pendingSub.cities = [...config.monitoring.cities];
+      } else if (city === 'done') {
+        // "Done selecting" — proceed with selected cities
+        if (session.selectedCities.length === 0) {
+          await ctx.answerCbQuery('Please select at least one city');
+          return;
+        }
+        session.pendingSub.cities = [...session.selectedCities];
+      } else {
+        // Toggle city selection
+        const idx = session.selectedCities.indexOf(city);
+        if (idx >= 0) {
+          session.selectedCities.splice(idx, 1);
+        } else {
+          session.selectedCities.push(city);
+        }
+
+        // Update the message to show selection state
+        const cities = config.monitoring.cities;
+        const buttons: ReturnType<typeof Markup.button.callback>[][] = [];
+        for (let i = 0; i < cities.length; i += 2) {
+          const row = [this.cityButton(cities[i], session.selectedCities)];
+          if (cities[i + 1]) {
+            row.push(this.cityButton(cities[i + 1], session.selectedCities));
+          }
+          buttons.push(row);
+        }
+        buttons.push([Markup.button.callback('📍 All Cities', 'city:all')]);
+        if (session.selectedCities.length > 0) {
+          buttons.push([Markup.button.callback(`✅ Done (${session.selectedCities.length} selected)`, 'city:done')]);
+        }
+
+        const selected = session.selectedCities.length > 0
+          ? `\n\n_Selected: ${session.selectedCities.join(', ')}_`
+          : '';
+
+        await ctx.editMessageText(
+          `🏙️ Which cities do you want to monitor?${selected}\n\n_Tap to select/deselect, then "Done" or "All Cities"\\._`,
+          {
+            parse_mode: 'MarkdownV2',
+            ...Markup.inlineKeyboard(buttons),
+          },
+        );
+        return;
+      }
 
       // Move to quantity step
       session.step = 'awaiting_quantity';
@@ -414,14 +603,15 @@ export class TelegramBotService {
         [Markup.button.callback('🎉 Any quantity', 'qty:1')],
       ];
 
-      const selectedCity = city === 'all'
+      const selectedCities = session.pendingSub.cities || [];
+      const cityLabel = selectedCities.length === config.monitoring.cities.length
         ? 'All cities'
-        : city.charAt(0).toUpperCase() + city.slice(1);
+        : selectedCities.map(c => c.charAt(0).toUpperCase() + c.slice(1)).join(', ');
 
       await ctx.editMessageText(
-        `✅ Monitoring: ${selectedCity}\n\n` +
+        `✅ Monitoring: ${cityLabel}\n\n` +
         `👥 How many seats together do you need?\n` +
-        `_This filters for consecutive seats available._`,
+        `_This filters for consecutive seats available\\._`,
         {
           parse_mode: 'MarkdownV2',
           ...Markup.inlineKeyboard(buttons),
@@ -438,6 +628,36 @@ export class TelegramBotService {
 
       session.pendingSub.minQuantity = qty;
 
+      // Move to budget step (NEW)
+      session.step = 'awaiting_budget';
+
+      const buttons = [
+        [Markup.button.callback('💰 $50/ticket', 'budget:50')],
+        [Markup.button.callback('💰 $100/ticket', 'budget:100')],
+        [Markup.button.callback('💰 $200/ticket', 'budget:200')],
+        [Markup.button.callback('♾️ No limit', 'budget:0')],
+      ];
+
+      await ctx.editMessageText(
+        `✅ Seats together: ${qty}\\+\n\n` +
+        `💰 What's your max budget per ticket?\n` +
+        `_Only deals within your budget will trigger alerts\\._`,
+        {
+          parse_mode: 'MarkdownV2',
+          ...Markup.inlineKeyboard(buttons),
+        },
+      );
+      return;
+    }
+
+    // --- Budget selection (subscribe flow) ---
+    if (data.startsWith('budget:')) {
+      const budget = parseInt(data.replace('budget:', ''), 10);
+      const session = this.sessions.get(chatId);
+      if (!session || session.step !== 'awaiting_budget') return;
+
+      session.pendingSub.maxPricePerTicket = budget;
+
       // Move to score threshold step
       session.step = 'awaiting_score';
 
@@ -448,10 +668,12 @@ export class TelegramBotService {
         [Markup.button.callback('📊 40+ (Show most)', 'score:40')],
       ];
 
+      const budgetLabel = budget > 0 ? `$${budget}/ticket` : 'No limit';
+
       await ctx.editMessageText(
-        `✅ Seats together: ${qty}+\n\n` +
+        `✅ Budget: ${budgetLabel}\n\n` +
         `🎯 What minimum value score should trigger an alert?\n` +
-        `_Higher = fewer but better deals._`,
+        `_Higher \\= fewer but better deals\\._`,
         {
           parse_mode: 'MarkdownV2',
           ...Markup.inlineKeyboard(buttons),
@@ -475,7 +697,10 @@ export class TelegramBotService {
         cities: session.pendingSub.cities || config.monitoring.cities,
         minScore: score,
         minQuantity: session.pendingSub.minQuantity || 1,
+        maxPricePerTicket: session.pendingSub.maxPricePerTicket || 0,
         active: true,
+        paused: false,
+        userTier: 'free',
       };
 
       // Remove any existing subscription for this user first
@@ -498,14 +723,19 @@ export class TelegramBotService {
         score >= 55 ? '👍 Fair+ (55+)' :
         '📊 Most deals (40+)';
 
+      const budgetLabel = sub.maxPricePerTicket > 0
+        ? `$${sub.maxPricePerTicket}/ticket`
+        : 'No limit';
+
       await ctx.editMessageText(
         `✅ *Subscription Active\\!*\n\n` +
         `🏙️ Cities: ${this.escapeMarkdown(sub.cities.join(', '))}\n` +
         `👥 Min seats together: ${sub.minQuantity}\n` +
+        `💰 Budget: ${this.escapeMarkdown(budgetLabel)}\n` +
         `🎯 Alert threshold: ${scoreLabel}\n\n` +
         `I'm now monitoring ticket platforms and will alert you when great deals appear\\. ` +
         `Each alert includes a venue seat map so you can see exactly where you'd sit\\.\n\n` +
-        `_Use /settings to view or /unsub to remove\\._`,
+        `_Use /settings to view, /pause to mute, or /unsub to remove\\._`,
         { parse_mode: 'MarkdownV2' },
       );
 
@@ -514,6 +744,7 @@ export class TelegramBotService {
         cities: sub.cities,
         minScore: sub.minScore,
         minQuantity: sub.minQuantity,
+        maxPrice: sub.maxPricePerTicket,
       });
       return;
     }
@@ -521,6 +752,50 @@ export class TelegramBotService {
     // --- Scan city from button ---
     if (data.startsWith('scan:')) {
       const city = data.replace('scan:', '');
+      await this.executeScan(ctx, city);
+      return;
+    }
+
+    // --- Unsub confirmation ---
+    if (data === 'unsub:confirm') {
+      this.monitor.removeSubscription(chatId);
+
+      // Persist to database (best-effort)
+      SubRepo.removeSubscription(chatId).catch(err => {
+        logger.warn('[TelegramBot] Failed to persist unsub', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+
+      await ctx.editMessageText(
+        '✅ Subscription removed. You will no longer receive alerts.\n\n' +
+        'Use /subscribe to set up again anytime.',
+      );
+      return;
+    }
+
+    if (data === 'unsub:cancel') {
+      await ctx.editMessageText('👍 Your subscription is still active. Alerts will continue.');
+      return;
+    }
+
+    // --- Alert action: Mute event ---
+    if (data.startsWith('mute:')) {
+      const eventId = data.replace('mute:', '');
+      if (!this.mutedEvents.has(eventId)) {
+        this.mutedEvents.set(eventId, new Set());
+      }
+      this.mutedEvents.get(eventId)!.add(chatId);
+
+      await ctx.answerCbQuery('🔕 Event muted — no more alerts for this event.');
+      logger.info('[TelegramBot] Event muted', { userId: chatId, eventId });
+      return;
+    }
+
+    // --- Alert action: Refresh prices ---
+    if (data.startsWith('refresh:')) {
+      const city = data.replace('refresh:', '');
+      await ctx.answerCbQuery('🔄 Refreshing...');
       await this.executeScan(ctx, city);
       return;
     }
@@ -546,6 +821,30 @@ export class TelegramBotService {
   }
 
   // ==========================================================================
+  // Alert Action Buttons — Called by TelegramNotifier after sending alerts
+  // ==========================================================================
+
+  /**
+   * Build inline keyboard for alert messages.
+   * TelegramNotifier can call this to get the action buttons for each alert.
+   */
+  buildAlertActions(eventCity: string, eventPlatformId: string): ReturnType<typeof Markup.inlineKeyboard> {
+    return Markup.inlineKeyboard([
+      [
+        Markup.button.callback('🔕 Mute Event', `mute:${eventPlatformId}`),
+        Markup.button.callback('🔄 Refresh', `refresh:${eventCity}`),
+      ],
+    ]);
+  }
+
+  /**
+   * Check if a user has muted a specific event
+   */
+  isEventMutedForUser(eventPlatformId: string, userId: string): boolean {
+    return this.mutedEvents.get(eventPlatformId)?.has(userId) ?? false;
+  }
+
+  // ==========================================================================
   // Helpers
   // ==========================================================================
 
@@ -558,5 +857,12 @@ export class TelegramBotService {
     if (score >= 70) return '✨';
     if (score >= 55) return '👍';
     return '📊';
+  }
+
+  /** Build a city button with ✅ prefix if selected */
+  private cityButton(city: string, selected: string[]): ReturnType<typeof Markup.button.callback> {
+    const isSelected = selected.includes(city);
+    const label = (isSelected ? '✅ ' : '') + city.charAt(0).toUpperCase() + city.slice(1);
+    return Markup.button.callback(label, `city:${city}`);
   }
 }

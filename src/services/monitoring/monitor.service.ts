@@ -31,12 +31,18 @@ export interface Subscription {
   minScore: number;
   /** Minimum number of consecutive seats needed (for families) */
   minQuantity: number;
+  /** Maximum price per ticket (budget cap). 0 = no limit. */
+  maxPricePerTicket: number;
   /** Keywords to filter events (optional) */
   keywords?: string[];
   /** Event categories to watch */
   categories?: string[];
-  /** Active flag */
+  /** Active flag (false = soft-deleted) */
   active: boolean;
+  /** Paused flag (true = temporarily muted, settings preserved) */
+  paused: boolean;
+  /** User tier for payment readiness */
+  userTier: 'free' | 'pro' | 'premium';
 }
 
 export interface MonitorConfig {
@@ -451,6 +457,7 @@ export class MonitorService {
     // Find matching subscribers
     const matchingSubscribers = [...this.subscriptions.values()].filter(sub => {
       if (!sub.active) return false;
+      if (sub.paused) return false;
       if (!sub.cities.some(c => c.toLowerCase() === event.venue.city.toLowerCase())) return false;
       // Check cooldown
       if (this.isAlertOnCooldown(event.platformId, sub.userId)) return false;
@@ -481,9 +488,16 @@ export class MonitorService {
 
     for (const sub of matchingSubscribers) {
       // Filter picks by quantity (family seat requirement)
-      const qualifyingPicks = sub.minQuantity > 1
+      let qualifyingPicks = sub.minQuantity > 1
         ? topPicks.filter(sp => sp.listing.quantity >= sub.minQuantity)
         : topPicks;
+
+      // Filter picks by budget (max price per ticket)
+      if (sub.maxPricePerTicket > 0) {
+        qualifyingPicks = qualifyingPicks.filter(
+          sp => sp.listing.pricePerTicket <= sub.maxPricePerTicket,
+        );
+      }
 
       if (qualifyingPicks.length === 0) continue;
 
@@ -520,6 +534,10 @@ export class MonitorService {
             userId: sub.userId,
             channel: sub.channel,
           });
+          // Auto-deactivate if user blocked bot or chat not found
+          if (this.shouldDeactivateOnError(result.error)) {
+            this.deactivateSubscription(sub.userId);
+          }
         }
       } catch (error) {
         logger.error(`[Monitor] Alert send error`, {
@@ -527,6 +545,11 @@ export class MonitorService {
           channel: sub.channel,
           error: error instanceof Error ? error.message : String(error),
         });
+        // Check for block/not-found errors in exceptions too
+        const msg = error instanceof Error ? error.message.toLowerCase() : '';
+        if (msg.includes('forbidden') || msg.includes('blocked') || msg.includes('chat not found')) {
+          this.deactivateSubscription(sub.userId);
+        }
       }
     }
   }
@@ -565,6 +588,58 @@ export class MonitorService {
   }
 
   // ==========================================================================
+  // Subscription Lifecycle
+  // ==========================================================================
+
+  /**
+   * Pause a subscription (preserves settings, stops alerts)
+   */
+  pauseSubscription(userId: string): boolean {
+    const sub = this.subscriptions.get(userId);
+    if (!sub || !sub.active) return false;
+    sub.paused = true;
+    logger.info('[Monitor] Subscription paused', { userId });
+    return true;
+  }
+
+  /**
+   * Resume a paused subscription
+   */
+  resumeSubscription(userId: string): boolean {
+    const sub = this.subscriptions.get(userId);
+    if (!sub || !sub.active) return false;
+    sub.paused = false;
+    logger.info('[Monitor] Subscription resumed', { userId });
+    return true;
+  }
+
+  /**
+   * Deactivate a subscription (e.g., user blocked bot)
+   */
+  private deactivateSubscription(userId: string): void {
+    const sub = this.subscriptions.get(userId);
+    if (sub) {
+      sub.active = false;
+      logger.warn('[Monitor] Subscription auto-deactivated', { userId });
+    }
+  }
+
+  /**
+   * Check if an error message indicates the subscription should be deactivated
+   */
+  private shouldDeactivateOnError(errorMsg?: string): boolean {
+    if (!errorMsg) return false;
+    const lower = errorMsg.toLowerCase();
+    return (
+      lower.includes('blocked') ||
+      lower.includes('forbidden') ||
+      lower.includes('chat not found') ||
+      lower.includes('user is deactivated') ||
+      lower.includes('bot was kicked')
+    );
+  }
+
+  // ==========================================================================
   // Helpers
   // ==========================================================================
 
@@ -590,6 +665,7 @@ export class MonitorService {
     running: boolean;
     trackedEvents: number;
     subscriptions: number;
+    pausedSubscriptions: number;
     alertsSent: number;
     eventsByPriority: { high: number; medium: number; low: number; past: number };
   } {
@@ -608,10 +684,14 @@ export class MonitorService {
       else low++;
     }
 
+    const allSubs = [...this.subscriptions.values()];
+    const pausedCount = allSubs.filter(s => s.paused).length;
+
     return {
       running: this.isRunning,
       trackedEvents: this.trackedEvents.size,
       subscriptions: this.subscriptions.size,
+      pausedSubscriptions: pausedCount,
       alertsSent: this.alertHistory.length,
       eventsByPriority: { high, medium, low, past },
     };

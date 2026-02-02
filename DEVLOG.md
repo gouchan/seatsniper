@@ -5,19 +5,35 @@
 
 ---
 
-## CURRENT STATE (as of 2026-02-01, session 3)
+## CURRENT STATE (as of 2026-02-01, session 4)
 
 ### What runs right now
-- `npm run build` compiles clean (tsup bundles 171KB ESM)
+- `npm run build` compiles clean (tsup bundles 184KB ESM)
 - `npx tsc --noEmit` passes with **0 errors**
 - `npm start` initializes adapters + notifiers, starts monitoring loop, launches Telegram bot
 - Docker Compose starts Postgres+TimescaleDB and Redis
 - Monitoring loop polls events on priority-based schedule (2min/10min/30min)
-- Telegram bot accepts commands (/start, /subscribe, /scan, /status, /settings, /help)
-- Subscriptions persist to PostgreSQL (auto-restored on restart)
+- Telegram bot accepts 9 commands (/start, /subscribe, /scan, /status, /settings, /pause, /resume, /unsub, /help)
+- Subscribe flow: City (multi-select) → Quantity → Budget → Score threshold (4-step)
+- Subscriptions persist to PostgreSQL with pause/resume + budget + user tier
 - Alert deduplication: 30-minute cooldown per event per user (in-memory + DB)
-- **Shared Telegraf instance** — bot UX + notifier share one bot (no polling conflicts)
+- Alert actions: inline buttons on alerts (🔕 Mute Event, 🔄 Refresh)
+- **Bot polling fixed** — TelegramBotService always calls `bot.launch()`
+- Auto-deactivation when users block the bot (stops wasting API cycles)
 - No tests exist (Vitest configured, zero test files)
+
+### Telegram Bot Commands
+| Command | What it does |
+|---------|--------------|
+| `/start` | Welcome + quick start guide |
+| `/subscribe` | 4-step setup: city → qty → budget → score threshold |
+| `/scan [city]` | One-shot scan with typing indicator + timeout + buy links |
+| `/status` | System status + your personal sub status |
+| `/settings` | View your preferences (cities, score, qty, budget, paused) |
+| `/pause` | Mute alerts (preserves all settings) |
+| `/resume` | Resume alerts |
+| `/unsub` | Unsubscribe with confirmation dialog |
+| `/help` | Full command reference |
 
 ### What actually works
 | Component | Status | Notes |
@@ -28,15 +44,15 @@
 | Value Engine | Works | 5-component weighted scoring algorithm |
 | Rate limiter | Fixed | Serialized via queue (2026-01-31) |
 | Circuit breaker | Fixed | Timeout inside retry (2026-01-31) |
-| Monitoring loop | **Hardened** | Cycle guards, event pruning, parallel discovery, parallel scan |
-| Telegram bot UX | **Hardened** | Session TTL, input sanitization, shared bot instance |
-| Telegram notifier | **Hardened** | MarkdownV2 fixed, shared Telegraf instance exposed |
+| Monitoring loop | **Hardened** | Cycle guards, event pruning, parallel discovery, budget + pause filter |
+| Telegram bot UX | **Upgraded** | 9 commands, multi-city, budget, pause/resume, mute, confirmations |
+| Telegram notifier | **Hardened** | MarkdownV2 fixed, shared Telegraf instance, auto-deactivate on block |
 | Telegram seat maps | Works | Sent as photos before text alerts with venue highlights |
 | SMS notifier | Untested | Twilio SDK wired, should work |
 | WhatsApp notifier | Untested | Twilio SDK wired, should work |
 | Seat map service | Partial | URL fetch works, local images for 5 venues |
 | Database pool | **Hardened** | connectionString vs host/port precedence fixed |
-| Subscription repo | Works | Upsert, soft-delete, restore on startup |
+| Subscription repo | **Upgraded** | +budget, +paused, +userTier, auto-migrate columns |
 | Alert repo | **Hardened** | SQL injection in cooldown check fixed |
 | Alert dedup | Works | 30-min cooldown, persisted alert history |
 | Shutdown | **Hardened** | Double-shutdown guard, signal dedup |
@@ -52,6 +68,58 @@
 ---
 
 ## WHAT WAS DONE EACH SESSION
+
+### Session: 2026-02-01 (Session 4) — Telegram UX Overhaul
+**Changes (3 files rewritten/upgraded):**
+
+#### Goal
+Make SeatSniper a top-tier Telegram bot: reliable, responsive, payment-ready, with a polished interactive UX that rivals the best bots on Telegram.
+
+#### Critical Fix: Bot Polling Not Working (#4)
+- **Problem:** TelegramNotifier created the Telegraf instance but never called `bot.launch()`. TelegramBotService received the shared instance and skipped `bot.launch()` because `ownsBot=false`. Result: handlers registered but **no long-polling**, so no commands worked.
+- **Fix:** TelegramBotService now **always** calls `bot.launch()` and `bot.stop()`. The notifier only uses raw API calls (`bot.telegram.sendMessage`), so it doesn't need polling. Removed the flawed `ownsBot` concept entirely.
+
+#### Reliability Improvements
+1. **Auto-deactivate on block** — When an alert delivery fails with "forbidden", "blocked", or "chat not found", the subscription is automatically deactivated. Stops wasting API cycles polling for users who blocked the bot.
+2. **Scan timeout protection** — `/scan` now races against a 45-second timeout. If platforms are slow, user gets a clear error message instead of infinite loading.
+3. **Typing indicator** — `/scan` sends `typing...` chat action so the user sees the bot is working while results load.
+4. **Unsub confirmation** — `/unsub` now asks "Are you sure?" with inline buttons (Yes / Keep alerts) instead of instant deletion. Points users to `/pause` as an alternative.
+
+#### New Commands
+5. **`/pause`** — Temporarily mutes alerts. Settings are preserved. Persisted to DB.
+6. **`/resume`** — Resumes a paused subscription. Persisted to DB.
+
+#### Subscribe Flow Upgrade (was 3 steps → now 4 steps)
+7. **Multi-city selection** — Users can tap multiple cities to toggle them on/off (with ✅ indicators), then tap "Done (N selected)" or "All Cities". No more single-city-only limitation.
+8. **Budget step (NEW)** — After quantity, users set a max price per ticket ($50, $100, $200, or no limit). Alerts only trigger for listings within budget.
+9. **Budget filtering in MonitorService** — `sendAlerts()` now filters `qualifyingPicks` by `sub.maxPricePerTicket` alongside the existing quantity filter.
+
+#### Scan Results Upgrade
+10. **Buy links in scan** — Each listing in scan results now includes a `[Buy](deepLink)` link, matching what alerts already had.
+
+#### Alert Interactions
+11. **Inline action buttons** — `buildAlertActions()` generates buttons for each alert: 🔕 Mute Event (suppresses future alerts for that event), 🔄 Refresh (re-scans the city).
+12. **Event muting** — `isEventMutedForUser()` API lets the monitor check if a user has muted a specific event before sending alerts.
+
+#### Payment Readiness
+13. **`userTier` field** — Subscription interface now includes `userTier: 'free' | 'pro' | 'premium'`. Stored in DB. Default: `'free'`. Ready for Telegram Payments integration.
+14. **DB auto-migration** — `ensureTable()` now runs `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for `max_price_per_ticket`, `paused`, and `user_tier`. Existing tables upgrade automatically.
+
+#### Status & Settings Upgrade
+15. **Personal status** — `/status` now shows your own subscription status (Active/Paused/Not subscribed) alongside system stats. Shows paused count.
+16. **Budget in settings** — `/settings` displays max price per ticket and paused status.
+
+#### Schema Changes
+- `Subscription` interface: added `maxPricePerTicket: number`, `paused: boolean`, `userTier: 'free' | 'pro' | 'premium'`
+- `MonitorService.getStatus()`: added `pausedSubscriptions` count
+- `MonitorService`: added `pauseSubscription()`, `resumeSubscription()`, `deactivateSubscription()`, `shouldDeactivateOnError()`
+- `user_subscriptions` table: added `max_price_per_ticket`, `paused`, `user_tier` columns
+
+#### Verification
+- `npx tsc --noEmit` — 0 errors
+- `npm run build` — clean (184KB ESM, tsup)
+
+---
 
 ### Session: 2026-02-01 (Session 3) — Deep Quality Audit & Hardening
 **Changes (5 modified files, 16 findings addressed):**
@@ -226,56 +294,69 @@ Sweep all code written in Session 2 for edge cases, race conditions, security ho
 ### Priority 1: Get running end-to-end
 1. Add real API keys to `.env` and test with live data
 2. Run `docker compose up` for Postgres, then `npm start`
-3. Talk to the Telegram bot: `/subscribe` → select Portland → Family (4) → Good (70+)
-4. Wait for alerts or run `/scan portland` for instant results
+3. Talk to the Telegram bot: `/subscribe` → select Portland + Seattle → Family (4) → $200/ticket → Good (70+)
+4. Wait for alerts or run `/scan portland` for instant results with buy links
+5. Try `/pause` → `/resume` cycle, verify DB persistence
 
 ### Priority 2: Hardening
 1. Add Vitest tests for MonitorService, ValueEngine, Telegram bot
 2. Fix remaining CRITICAL security findings (C1-C4)
 3. Add structured error handling (categorized errors from circuit-breaker.ts)
 4. Add Redis caching for event data between polls
+5. Wire `buildAlertActions()` into TelegramNotifier.sendAlert() for inline buttons on alerts
 
 ### Priority 3: Enhanced UX
 1. `/watch [event name]` — subscribe to specific events
-2. Inline keyboard on alerts: "🔕 Mute" / "⭐ Save" / "📊 More like this"
+2. Wire muted events check into MonitorService alert dispatch
 3. Seat map highlighting with top deals marked on the map
 4. Historical price chart (via TimescaleDB continuous aggregates)
-5. `/budget` — set max price per ticket
+5. `/feedback` — user feedback loop
+
+### Priority 4: Monetization
+1. Telegram Payments API (Stars) integration for `/upgrade`
+2. Tier-based rate limiting (free: 3 scans/day, pro: unlimited)
+3. Pro features: real-time price drop alerts, historical charts, priority polling
+4. Stripe webhook for subscription management
 
 ---
 
 ## ARCHITECTURE
 
 ```
-User ←→ Telegram Bot (/subscribe, /scan, /status)
+User ←→ Telegram Bot (9 commands, inline actions)
               │
               ▼
-     ┌─ SeatSniperApp ──────────────────────────────────┐
-     │                                                    │
-     │  MonitorService (priority-based polling)            │
-     │    │                                                │
-     │    ├── Discovery: every 15 min, all adapters        │
-     │    ├── High-pri poll: <7 days, every 2 min          │
-     │    ├── Med-pri poll: 7-30 days, every 10 min        │
-     │    ├── Low-pri poll: >30 days, every 30 min         │
-     │    │                                                │
-     │    ├── ValueEngine: score all listings               │
-     │    ├── Filter: score >= threshold, qty >= minQty     │
-     │    ├── Dedup: 30-min cooldown (memory + DB)          │
-     │    └── Alert: TelegramNotifier + seat map image      │
-     │                                                      │
-     │  TelegramBotService (interactive commands)           │
-     │    ├── /subscribe → city → quantity → score → save   │
-     │    ├── /scan → one-shot city results                 │
-     │    └── /status, /settings, /unsub, /help             │
-     │                                                      │
-     │  PostgreSQL (via pg Pool)                             │
-     │    ├── user_subscriptions (persisted prefs)           │
-     │    ├── alert_log (dedup + audit)                      │
-     │    └── Full schema: events, listings, venues (future) │
-     │                                                       │
-     │  Redis: cache (future)                                │
-     └──────────────────────────────────────────────────────┘
+     ┌─ SeatSniperApp ──────────────────────────────────────┐
+     │                                                        │
+     │  MonitorService (priority-based polling)                │
+     │    │                                                    │
+     │    ├── Discovery: every 15 min, all adapters (parallel) │
+     │    ├── High-pri poll: <7 days, every 2 min              │
+     │    ├── Med-pri poll: 7-30 days, every 10 min            │
+     │    ├── Low-pri poll: >30 days, every 30 min             │
+     │    │                                                    │
+     │    ├── ValueEngine: score all listings                   │
+     │    ├── Filter: score + qty + budget + paused + muted    │
+     │    ├── Dedup: 30-min cooldown (memory + DB)             │
+     │    ├── Auto-deactivate: blocked/deleted users            │
+     │    └── Alert: TelegramNotifier + seat map + buy links   │
+     │                                                         │
+     │  TelegramBotService (manages long-polling lifecycle)    │
+     │    ├── /subscribe → cities → qty → budget → score       │
+     │    ├── /scan → typing + timeout + buy links             │
+     │    ├── /pause, /resume — mute/unmute alerts             │
+     │    ├── /unsub — with confirmation dialog                │
+     │    ├── /status — system + personal sub status           │
+     │    ├── /settings — shows budget, paused, tier           │
+     │    └── Alert actions: 🔕 Mute Event, 🔄 Refresh        │
+     │                                                         │
+     │  PostgreSQL (via pg Pool)                                │
+     │    ├── user_subscriptions (+budget, +paused, +userTier) │
+     │    ├── alert_log (dedup + audit)                         │
+     │    └── Auto-migrate new columns on startup               │
+     │                                                          │
+     │  Redis: cache (future)                                   │
+     └─────────────────────────────────────────────────────────┘
 ```
 
 ---
