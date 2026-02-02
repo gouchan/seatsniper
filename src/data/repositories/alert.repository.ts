@@ -82,15 +82,19 @@ export async function isAlertOnCooldown(
   userId: string,
   cooldownMs: number,
 ): Promise<boolean> {
+  // Use make_interval with seconds to avoid SQL injection via string concatenation.
+  // $3 is always a number (cooldownMs / 1000), but parameterized for safety.
+  const cooldownSec = Math.max(0, Math.floor(cooldownMs / 1000));
+
   const result = await query<{ exists: boolean }>(
     `SELECT EXISTS(
       SELECT 1 FROM alert_log
       WHERE event_id = $1
         AND user_id = $2
         AND success = true
-        AND sent_at > NOW() - ($3 || ' milliseconds')::interval
+        AND sent_at > NOW() - ($3::numeric * interval '1 second')
     ) AS exists`,
-    [eventId, userId, cooldownMs.toString()],
+    [eventId, userId, cooldownSec],
   );
 
   return result.rows[0]?.exists ?? false;

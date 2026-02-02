@@ -30,7 +30,12 @@ interface UserSession {
   step: 'idle' | 'awaiting_city' | 'awaiting_quantity' | 'awaiting_score';
   /** Partially built subscription */
   pendingSub: Partial<Subscription>;
+  /** When this session was created (for TTL expiry) */
+  createdAt: number;
 }
+
+/** Sessions expire after 10 minutes of inactivity */
+const SESSION_TTL_MS = 10 * 60 * 1000;
 
 // ============================================================================
 // Telegram Bot Service
@@ -40,14 +45,22 @@ export class TelegramBotService {
   private bot: Telegraf;
   private monitor: MonitorService;
   private sessions: Map<string, UserSession> = new Map();
+  private sessionPruneTimer: NodeJS.Timeout | null = null;
+  private ownsBot: boolean;
   private isRunning = false;
 
-  constructor(monitor: MonitorService) {
-    if (!config.telegram.botToken) {
+  /**
+   * @param monitor - The monitoring service to wire commands to
+   * @param existingBot - Optional shared Telegraf instance (to avoid duplicate polling).
+   *                      If omitted, creates a new instance.
+   */
+  constructor(monitor: MonitorService, existingBot?: Telegraf) {
+    if (!existingBot && !config.telegram.botToken) {
       throw new Error('Telegram bot token not configured');
     }
 
-    this.bot = new Telegraf(config.telegram.botToken);
+    this.bot = existingBot ?? new Telegraf(config.telegram.botToken);
+    this.ownsBot = !existingBot; // Only launch/stop if we created it
     this.monitor = monitor;
     this.registerHandlers();
   }
@@ -63,17 +76,44 @@ export class TelegramBotService {
     logger.info(`[TelegramBot] Starting @${botInfo.username}`);
 
     // Use long-polling (webhook can be configured for production)
-    void this.bot.launch();
+    // Only launch if we own the bot instance (not shared with TelegramNotifier)
+    if (this.ownsBot) {
+      void this.bot.launch();
+    }
     this.isRunning = true;
+
+    // Prune stale sessions every 5 minutes
+    this.sessionPruneTimer = setInterval(() => this.pruneSessions(), 5 * 60 * 1000);
 
     logger.info(`[TelegramBot] Bot is live — @${botInfo.username}`);
   }
 
   async stop(): Promise<void> {
     if (!this.isRunning) return;
-    this.bot.stop('SIGTERM');
+    if (this.sessionPruneTimer) {
+      clearInterval(this.sessionPruneTimer);
+      this.sessionPruneTimer = null;
+    }
+    this.sessions.clear();
+    if (this.ownsBot) {
+      this.bot.stop('SIGTERM');
+    }
     this.isRunning = false;
     logger.info('[TelegramBot] Stopped');
+  }
+
+  private pruneSessions(): void {
+    const now = Date.now();
+    let pruned = 0;
+    for (const [chatId, session] of this.sessions) {
+      if (now - session.createdAt > SESSION_TTL_MS) {
+        this.sessions.delete(chatId);
+        pruned++;
+      }
+    }
+    if (pruned > 0) {
+      logger.debug(`[TelegramBot] Pruned ${pruned} stale sessions`);
+    }
   }
 
   // ==========================================================================
@@ -143,6 +183,7 @@ export class TelegramBotService {
         channel: 'telegram',
         active: true,
       },
+      createdAt: Date.now(),
     });
 
     const cities = config.monitoring.cities;
@@ -217,18 +258,25 @@ export class TelegramBotService {
   }
 
   private async executeScan(ctx: TelegrafContext, city: string): Promise<void> {
-    await ctx.reply(`🔍 Scanning ${city}... This may take a moment.`);
+    // Sanitize city input: only allow letters, spaces, hyphens
+    const sanitized = city.replace(/[^a-zA-Z\s-]/g, '').trim().toLowerCase();
+    if (!sanitized || sanitized.length > 50) {
+      await ctx.reply('Please enter a valid city name (letters only, max 50 chars).');
+      return;
+    }
+
+    await ctx.reply(`🔍 Scanning ${sanitized}... This may take a moment.`);
 
     try {
-      const result = await this.monitor.scanCity(city);
+      const result = await this.monitor.scanCity(sanitized);
 
       if (result.events === 0) {
-        await ctx.reply(`No events found in ${city} for the next 30 days.`);
+        await ctx.reply(`No events found in ${sanitized} for the next 30 days.`);
         return;
       }
 
       let response =
-        `📊 *${this.escapeMarkdown(city.charAt(0).toUpperCase() + city.slice(1))} Scan Results*\n\n` +
+        `📊 *${this.escapeMarkdown(sanitized.charAt(0).toUpperCase() + sanitized.slice(1))} Scan Results*\n\n` +
         `🎫 Events found: ${result.events}\n` +
         `🎟️ Listings sampled: ${result.listings}\n` +
         `⭐ Top picks: ${result.topPicks.length}\n\n`;
@@ -241,12 +289,12 @@ export class TelegramBotService {
           response +=
             `\n${this.getScoreEmoji(s.totalScore)} *Score ${s.totalScore}/100*\n` +
             `   ${this.escapeMarkdown(l.section)} Row ${this.escapeMarkdown(l.row)} — ` +
-            `$${l.pricePerTicket}/ea \\(${l.quantity} avail\\)\n` +
+            `${this.escapeMarkdown(`$${l.pricePerTicket}/ea`)} ${this.escapeMarkdown(`(${l.quantity} avail)`)}\n` +
             `   _${this.escapeMarkdown(s.reasoning)}_\n`;
         }
       }
 
-      response += `\n_Use /subscribe to get alerts when great deals appear\\!_`;
+      response += `\n_Use /subscribe to get alerts when great deals appear${this.escapeMarkdown('!')}_`;
 
       await ctx.reply(response, { parse_mode: 'MarkdownV2' });
     } catch (error) {

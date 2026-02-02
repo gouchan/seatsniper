@@ -287,11 +287,13 @@ export class SeatSniperApp {
     this.monitor.start();
 
     // Start Telegram bot for interactive commands
+    // Share the Telegraf instance from TelegramNotifier to avoid duplicate long-polling
     if (config.telegram.botToken && this.notifiers.has('telegram')) {
       try {
-        this.telegramBot = new TelegramBotService(this.monitor);
+        const telegramNotifier = this.notifiers.get('telegram') as TelegramNotifier;
+        this.telegramBot = new TelegramBotService(this.monitor, telegramNotifier.bot);
         await this.telegramBot.start();
-        logger.info('  ✓ Telegram bot UX active');
+        logger.info('  ✓ Telegram bot UX active (shared instance)');
       } catch (error) {
         logger.warn('  ✗ Telegram bot failed to start', {
           error: error instanceof Error ? error.message : 'Unknown error',
@@ -395,7 +397,10 @@ async function main(): Promise<void> {
   });
 
   // --- Graceful shutdown on SIGINT / SIGTERM ---
+  let shuttingDown = false;
   const shutdown = async (signal: string) => {
+    if (shuttingDown) return; // Prevent double-shutdown race
+    shuttingDown = true;
     logger.info(`Received ${signal}, shutting down gracefully...`);
     await app.stop();
     process.exit(0);

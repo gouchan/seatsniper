@@ -23,7 +23,8 @@ import { config } from '../../config/index.js';
 export class TelegramNotifier implements INotifier {
   readonly channel: NotificationChannel = 'telegram';
 
-  private bot: Telegraf;
+  /** Exposed for sharing with TelegramBotService to avoid duplicate polling */
+  readonly bot: Telegraf;
   private formatter: TelegramFormatter;
   private seatMapService: SeatMapService;
   private isInitialized: boolean = false;

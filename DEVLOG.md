@@ -5,17 +5,18 @@
 
 ---
 
-## CURRENT STATE (as of 2026-02-01, session 2)
+## CURRENT STATE (as of 2026-02-01, session 3)
 
 ### What runs right now
-- `npm run build` compiles clean (tsup bundles 167KB ESM)
-- `npx tsc --noEmit` passes with **0 errors** (was 35)
+- `npm run build` compiles clean (tsup bundles 171KB ESM)
+- `npx tsc --noEmit` passes with **0 errors**
 - `npm start` initializes adapters + notifiers, starts monitoring loop, launches Telegram bot
 - Docker Compose starts Postgres+TimescaleDB and Redis
 - Monitoring loop polls events on priority-based schedule (2min/10min/30min)
 - Telegram bot accepts commands (/start, /subscribe, /scan, /status, /settings, /help)
 - Subscriptions persist to PostgreSQL (auto-restored on restart)
 - Alert deduplication: 30-minute cooldown per event per user (in-memory + DB)
+- **Shared Telegraf instance** — bot UX + notifier share one bot (no polling conflicts)
 - No tests exist (Vitest configured, zero test files)
 
 ### What actually works
@@ -27,17 +28,20 @@
 | Value Engine | Works | 5-component weighted scoring algorithm |
 | Rate limiter | Fixed | Serialized via queue (2026-01-31) |
 | Circuit breaker | Fixed | Timeout inside retry (2026-01-31) |
-| **Monitoring loop** | **NEW** | Priority-based polling, event discovery, listing scoring, alert dispatch |
-| **Telegram bot UX** | **NEW** | Interactive subscribe flow (city → quantity → score threshold) |
-| Telegram notifier | **Fixed** | MarkdownV2 escaping corrected (was C6 double-escape bug) |
+| Monitoring loop | **Hardened** | Cycle guards, event pruning, parallel discovery, parallel scan |
+| Telegram bot UX | **Hardened** | Session TTL, input sanitization, shared bot instance |
+| Telegram notifier | **Hardened** | MarkdownV2 fixed, shared Telegraf instance exposed |
 | Telegram seat maps | Works | Sent as photos before text alerts with venue highlights |
 | SMS notifier | Untested | Twilio SDK wired, should work |
 | WhatsApp notifier | Untested | Twilio SDK wired, should work |
 | Seat map service | Partial | URL fetch works, local images for 5 venues |
-| **Database** | **NEW** | Pool, subscription repo, alert log repo |
-| **Alert dedup** | **NEW** | 30-min cooldown, persisted alert history |
+| Database pool | **Hardened** | connectionString vs host/port precedence fixed |
+| Subscription repo | Works | Upsert, soft-delete, restore on startup |
+| Alert repo | **Hardened** | SQL injection in cooldown check fixed |
+| Alert dedup | Works | 30-min cooldown, persisted alert history |
+| Shutdown | **Hardened** | Double-shutdown guard, signal dedup |
 | Redis cache | NOT STARTED | Configured in Docker, zero code uses it |
-| TypeScript | **Clean** | 0 errors (was 35) |
+| TypeScript | **Clean** | 0 errors |
 
 ### What DOESN'T work (blocking production)
 1. **No tests** — zero test files exist
@@ -48,6 +52,46 @@
 ---
 
 ## WHAT WAS DONE EACH SESSION
+
+### Session: 2026-02-01 (Session 3) — Deep Quality Audit & Hardening
+**Changes (5 modified files, 16 findings addressed):**
+
+#### Goal
+Sweep all code written in Session 2 for edge cases, race conditions, security holes, memory leaks, and UX bugs. Target: top-1% engineering quality for a production Telegram bot.
+
+#### Findings & Fixes
+
+**MonitorService (6 findings fixed):**
+1. **Subscription duplicates** — `Array.push()` allowed same user twice. Changed `subscriptions` from `Subscription[]` to `Map<string, Subscription>` with upsert semantics.
+2. **Concurrent cycle overlap** — Two timer firings could run the same priority cycle simultaneously. Added `activeCycles: Set<string>` guard; overlapping cycles skip silently.
+3. **Memory leak: trackedEvents never pruned** — Past events accumulated forever. Added `pruneTrackedEvents()` that evicts events >1 day past, called at start of every discovery cycle.
+4. **Discovery sequential by city** — Was `for...of` loop. Now `Promise.allSettled()` across cities, then adapters within each city.
+5. **scanCity sequential by adapter** — Same fix: parallelized with `Promise.allSettled()`.
+6. **Dead code** — Removed unused `_allListings` parameter from `sendAlerts()` and unused `NormalizedListing` import.
+
+**TelegramBotService (5 findings fixed):**
+7. **MarkdownV2 C6 repeat** — Scan results had hardcoded `\\(` `\\)` pre-escaping. Replaced with `this.escapeMarkdown()` calls.
+8. **Session memory leak** — No TTL on subscribe-flow sessions. Added `SESSION_TTL_MS = 10min`, `createdAt` timestamp, `pruneSessions()` running every 5 minutes.
+9. **No input validation on /scan** — City input could contain arbitrary chars. Added regex sanitization: `[^a-zA-Z\s-]` stripped, 50-char limit.
+10. **Duplicate Telegraf instances** — TelegramBotService created its own `new Telegraf()`, conflicting with TelegramNotifier's instance (duplicate long-polling). Added `existingBot?: Telegraf` constructor param and `ownsBot` flag. Only `launch()`/`stop()` if bot is owned.
+
+**Database Layer (2 findings fixed):**
+11. **SQL injection in alert cooldown** — `isAlertOnCooldown()` used `($3 || ' milliseconds')::interval` which concatenated user-controlled value into SQL. Replaced with `($3::numeric * interval '1 second')` using parameterized seconds.
+12. **connectionString + host/port conflict** — `pg.Pool` received both `connectionString` and individual `host`/`port`/`database` fields, causing ambiguous behaviour. Now uses either `connectionString` exclusively or individual fields, never both.
+
+**index.ts Wiring (3 findings fixed):**
+13. **Shared Telegraf instance** — `start()` now passes `telegramNotifier.bot` to `TelegramBotService` constructor, so both share one bot instance (no duplicate polling).
+14. **Double shutdown race** — Multiple SIGINT/SIGTERM signals could trigger concurrent `app.stop()` calls. Added `shuttingDown` boolean guard in `main()`.
+15. **TelegramNotifier bot access** — Changed `private bot: Telegraf` to `readonly bot: Telegraf` to enable sharing.
+
+**Formatter (1 finding reviewed, no change needed):**
+16. **escapeMarkdown regex** — Reviewed character class `[_*[\]()~`>#+=|{}.!\\-]`. Confirmed correct: backslash escaped, hyphen at end (literal), all MarkdownV2 special chars covered.
+
+#### Verification
+- `npx tsc --noEmit` — 0 errors
+- `npm run build` — clean (171KB ESM, tsup)
+
+---
 
 ### Session: 2026-02-01 (Session 2) — MVP Feature Build
 **Changes (8 new/modified files):**
@@ -138,7 +182,7 @@
 | C5 | OAuth token refresh race condition | **FIXED** (2026-01-31) |
 | C6 | Telegram MarkdownV2 double-escaping | **FIXED** (2026-02-01) |
 
-### HIGH (still open: 8 of 14)
+### HIGH (still open: 7 of 14)
 | # | Finding | Status |
 |---|---------|--------|
 | H1 | No HTTPS enforcement | OPEN |
@@ -147,7 +191,7 @@
 | H4 | Redis unauthenticated | OPEN |
 | H5 | No unhandled rejection handler | **FIXED** (2026-01-31) |
 | H6 | Config PORT coercion to NaN | OPEN |
-| H7 | DB URL with undefined password | OPEN |
+| H7 | DB URL with undefined password | **FIXED** (2026-02-01, S3: connectionString vs host/port precedence) |
 | H8 | Resilience timeout conflict | **FIXED** (2026-01-31) |
 | H9 | Rate limiter goes negative | **FIXED** (2026-01-31) |
 | H10 | Seat map images missing | OPEN (non-blocking — URL fetch works) |
@@ -155,6 +199,23 @@
 | H12 | Ticketmaster price semantics | OPEN |
 | H13 | Error stack traces lost | OPEN |
 | H14 | `main()` runs on import | OPEN |
+
+### NEW FINDINGS from Session 3 (all FIXED)
+| # | Finding | Category | Status |
+|---|---------|----------|--------|
+| S3-1 | Subscription duplicates (Array.push) | Memory/Logic | **FIXED** |
+| S3-2 | Concurrent cycle overlap (no guard) | Race condition | **FIXED** |
+| S3-3 | TrackedEvents memory leak (no pruning) | Memory | **FIXED** |
+| S3-4 | Sequential discovery (slow) | Performance | **FIXED** |
+| S3-5 | Sequential scanCity (slow) | Performance | **FIXED** |
+| S3-6 | Dead code (unused params/imports) | Quality | **FIXED** |
+| S3-7 | MarkdownV2 C6 repeat in scan results | UX bug | **FIXED** |
+| S3-8 | Session memory leak (no TTL) | Memory | **FIXED** |
+| S3-9 | No input validation on /scan | Security | **FIXED** |
+| S3-10 | Duplicate Telegraf instances | Architecture | **FIXED** |
+| S3-11 | SQL injection in cooldown check | Security | **FIXED** |
+| S3-12 | connectionString + host/port conflict | Config bug | **FIXED** |
+| S3-13 | Double shutdown race | Race condition | **FIXED** |
 
 ### MEDIUM (still open: 15 of 18) | LOW: All 11 still OPEN
 

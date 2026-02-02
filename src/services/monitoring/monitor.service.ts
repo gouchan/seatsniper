@@ -7,7 +7,6 @@
 import type {
   IPlatformAdapter,
   NormalizedEvent,
-  NormalizedListing,
   EventSearchParams,
 } from '../../adapters/base/platform-adapter.interface.js';
 import type { INotifier, TopValueListing, AlertPayload } from '../../notifications/base/notifier.interface.js';
@@ -90,7 +89,8 @@ export class MonitorService {
   private timers: NodeJS.Timeout[] = [];
   private trackedEvents: Map<string, TrackedEvent> = new Map();
   private alertHistory: AlertRecord[] = [];
-  private subscriptions: Subscription[] = [];
+  private subscriptions: Map<string, Subscription> = new Map(); // keyed by userId
+  private activeCycles: Set<string> = new Set(); // guards against overlapping cycles
 
   constructor(
     adapters: Map<string, IPlatformAdapter>,
@@ -193,7 +193,7 @@ export class MonitorService {
   // ==========================================================================
 
   addSubscription(sub: Subscription): void {
-    this.subscriptions.push(sub);
+    this.subscriptions.set(sub.userId, sub);
     logger.info('[Monitor] Subscription added', {
       userId: sub.userId,
       channel: sub.channel,
@@ -204,12 +204,12 @@ export class MonitorService {
   }
 
   removeSubscription(userId: string): void {
-    this.subscriptions = this.subscriptions.filter(s => s.userId !== userId);
+    this.subscriptions.delete(userId);
     logger.info('[Monitor] Subscription removed', { userId });
   }
 
   getSubscriptions(): Subscription[] {
-    return [...this.subscriptions];
+    return [...this.subscriptions.values()];
   }
 
   // ==========================================================================
@@ -218,42 +218,57 @@ export class MonitorService {
 
   private async runDiscoveryCycle(): Promise<void> {
     if (!this.isRunning) return;
+    if (this.activeCycles.has('discovery')) {
+      logger.debug('[Monitor] Discovery cycle already running, skipping');
+      return;
+    }
 
-    logger.info('[Monitor] Running event discovery cycle');
+    this.activeCycles.add('discovery');
+    try {
+      logger.info('[Monitor] Running event discovery cycle');
 
-    const cities = config.monitoring.cities;
-    const now = new Date();
+      // Prune past events first (>1 day past)
+      this.pruneTrackedEvents();
 
-    for (const city of cities) {
-      const searchParams: EventSearchParams = {
-        city,
-        startDate: now,
-        endDate: new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000), // 90 days out
-        limit: 100,
-      };
+      const cities = config.monitoring.cities;
+      const now = new Date();
 
-      // Query all adapters in parallel
-      const adapterPromises = [...this.adapters.entries()].map(
-        async ([name, adapter]) => {
-          try {
-            const events = await adapter.searchEvents(searchParams);
-            logger.debug(`[Monitor] ${name} found ${events.length} events in ${city}`);
-            return events;
-          } catch (error) {
-            logger.warn(`[Monitor] ${name} discovery failed for ${city}`, {
-              error: error instanceof Error ? error.message : String(error),
-            });
-            return [] as NormalizedEvent[];
-          }
-        },
-      );
+      // Parallelize across cities
+      const cityPromises = cities.map(async (city) => {
+        const searchParams: EventSearchParams = {
+          city,
+          startDate: now,
+          endDate: new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000), // 90 days out
+          limit: 100,
+        };
 
-      const results = await Promise.allSettled(adapterPromises);
-      const allEvents = results
+        // Query all adapters in parallel per city
+        const adapterPromises = [...this.adapters.entries()].map(
+          async ([name, adapter]) => {
+            try {
+              const events = await adapter.searchEvents(searchParams);
+              logger.debug(`[Monitor] ${name} found ${events.length} events in ${city}`);
+              return events;
+            } catch (error) {
+              logger.warn(`[Monitor] ${name} discovery failed for ${city}`, {
+                error: error instanceof Error ? error.message : String(error),
+              });
+              return [] as NormalizedEvent[];
+            }
+          },
+        );
+
+        const results = await Promise.allSettled(adapterPromises);
+        return results
+          .filter((r): r is PromiseFulfilledResult<NormalizedEvent[]> => r.status === 'fulfilled')
+          .flatMap(r => r.value);
+      });
+
+      const citiesResults = await Promise.allSettled(cityPromises);
+      const allEvents = citiesResults
         .filter((r): r is PromiseFulfilledResult<NormalizedEvent[]> => r.status === 'fulfilled')
         .flatMap(r => r.value);
 
-      // Deduplicate by name + venue + date (events may appear across platforms)
       for (const event of allEvents) {
         const key = `${event.platform}:${event.platformId}`;
         if (!this.trackedEvents.has(key)) {
@@ -264,11 +279,30 @@ export class MonitorService {
           });
         }
       }
-    }
 
-    logger.info('[Monitor] Discovery complete', {
-      totalTracked: this.trackedEvents.size,
-    });
+      logger.info('[Monitor] Discovery complete', {
+        totalTracked: this.trackedEvents.size,
+      });
+    } finally {
+      this.activeCycles.delete('discovery');
+    }
+  }
+
+  /**
+   * Remove past events (>1 day old) to prevent memory leak
+   */
+  private pruneTrackedEvents(): void {
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    let pruned = 0;
+    for (const [key, tracked] of this.trackedEvents) {
+      if (tracked.event.dateTime.getTime() < cutoff) {
+        this.trackedEvents.delete(key);
+        pruned++;
+      }
+    }
+    if (pruned > 0) {
+      logger.debug(`[Monitor] Pruned ${pruned} past events`);
+    }
   }
 
   // ==========================================================================
@@ -277,30 +311,39 @@ export class MonitorService {
 
   private async runListingsCycle(priority: 'high' | 'medium' | 'low'): Promise<void> {
     if (!this.isRunning) return;
-    if (this.subscriptions.length === 0) {
+    if (this.subscriptions.size === 0) {
       logger.debug(`[Monitor] Skipping ${priority} cycle — no subscriptions`);
       return;
     }
-
-    const now = new Date();
-    const eventsToProcess = this.getEventsForPriority(priority, now);
-
-    if (eventsToProcess.length === 0) {
-      logger.debug(`[Monitor] No ${priority}-priority events to process`);
+    if (this.activeCycles.has(priority)) {
+      logger.debug(`[Monitor] ${priority} cycle already running, skipping`);
       return;
     }
 
-    logger.info(`[Monitor] Processing ${eventsToProcess.length} ${priority}-priority events`);
+    this.activeCycles.add(priority);
+    try {
+      const now = new Date();
+      const eventsToProcess = this.getEventsForPriority(priority, now);
 
-    // Process events in batches to respect rate limits
-    const batchSize = 5;
-    for (let i = 0; i < eventsToProcess.length; i += batchSize) {
-      if (!this.isRunning) break;
+      if (eventsToProcess.length === 0) {
+        logger.debug(`[Monitor] No ${priority}-priority events to process`);
+        return;
+      }
 
-      const batch = eventsToProcess.slice(i, i + batchSize);
-      await Promise.allSettled(
-        batch.map(tracked => this.processEvent(tracked)),
-      );
+      logger.info(`[Monitor] Processing ${eventsToProcess.length} ${priority}-priority events`);
+
+      // Process events in batches to respect rate limits
+      const batchSize = 5;
+      for (let i = 0; i < eventsToProcess.length; i += batchSize) {
+        if (!this.isRunning) break;
+
+        const batch = eventsToProcess.slice(i, i + batchSize);
+        await Promise.allSettled(
+          batch.map(tracked => this.processEvent(tracked)),
+        );
+      }
+    } finally {
+      this.activeCycles.delete(priority);
     }
   }
 
@@ -386,7 +429,7 @@ export class MonitorService {
       });
 
       // Send alerts to matching subscribers
-      await this.sendAlerts(event, topPicks, listings);
+      await this.sendAlerts(event, topPicks);
       tracked.lastListingCount = listings.length;
     } catch (error) {
       logger.warn(`[Monitor] Failed to process event "${event.name}"`, {
@@ -404,10 +447,9 @@ export class MonitorService {
   private async sendAlerts(
     event: NormalizedEvent,
     topPicks: ScoredListing[],
-    _allListings: NormalizedListing[],
   ): Promise<void> {
     // Find matching subscribers
-    const matchingSubscribers = this.subscriptions.filter(sub => {
+    const matchingSubscribers = [...this.subscriptions.values()].filter(sub => {
       if (!sub.active) return false;
       if (!sub.cities.some(c => c.toLowerCase() === event.venue.city.toLowerCase())) return false;
       // Check cooldown
@@ -569,7 +611,7 @@ export class MonitorService {
     return {
       running: this.isRunning,
       trackedEvents: this.trackedEvents.size,
-      subscriptions: this.subscriptions.length,
+      subscriptions: this.subscriptions.size,
       alertsSent: this.alertHistory.length,
       eventsByPriority: { high, medium, low, past },
     };
@@ -595,39 +637,52 @@ export class MonitorService {
     let totalListings = 0;
     const allScoredListings: ScoredListing[] = [];
 
-    for (const [name, adapter] of this.adapters) {
-      try {
-        const events = await adapter.searchEvents(searchParams);
-        totalEvents += events.length;
+    // Parallelize across adapters
+    const adapterResults = await Promise.allSettled(
+      [...this.adapters.entries()].map(async ([name, adapter]) => {
+        try {
+          const events = await adapter.searchEvents(searchParams);
+          let listingCount = 0;
+          const scored: ScoredListing[] = [];
 
-        // Pick first few events to sample listings
-        const sampleEvents = events.slice(0, 3);
-        for (const event of sampleEvents) {
-          const listings = await adapter.getEventListings(event.platformId);
-          totalListings += listings.length;
+          // Sample first few events for listings
+          const sampleEvents = events.slice(0, 3);
+          for (const event of sampleEvents) {
+            const listings = await adapter.getEventListings(event.platformId);
+            listingCount += listings.length;
 
-          if (listings.length > 0) {
-            const averagePrice = this.valueEngine.calculateAveragePrice(listings);
-            const daysUntilEvent = Math.max(
-              0,
-              Math.ceil((event.dateTime.getTime() - Date.now()) / (24 * 60 * 60 * 1000)),
-            );
+            if (listings.length > 0) {
+              const averagePrice = this.valueEngine.calculateAveragePrice(listings);
+              const daysUntilEvent = Math.max(
+                0,
+                Math.ceil((event.dateTime.getTime() - Date.now()) / (24 * 60 * 60 * 1000)),
+              );
 
-            const scored = this.valueEngine.scoreListings(listings, {
-              averagePrice,
-              sectionTiers: {},
-              historicalData: new Map(),
-              eventPopularity: 50,
-              daysUntilEvent,
-            });
-
-            allScoredListings.push(...scored);
+              scored.push(...this.valueEngine.scoreListings(listings, {
+                averagePrice,
+                sectionTiers: {},
+                historicalData: new Map(),
+                eventPopularity: 50,
+                daysUntilEvent,
+              }));
+            }
           }
+
+          return { events: events.length, listings: listingCount, scored };
+        } catch (error) {
+          logger.warn(`[Monitor] scanCity failed for ${name}`, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return { events: 0, listings: 0, scored: [] as ScoredListing[] };
         }
-      } catch (error) {
-        logger.warn(`[Monitor] scanCity failed for ${name}`, {
-          error: error instanceof Error ? error.message : String(error),
-        });
+      }),
+    );
+
+    for (const result of adapterResults) {
+      if (result.status === 'fulfilled') {
+        totalEvents += result.value.events;
+        totalListings += result.value.listings;
+        allScoredListings.push(...result.value.scored);
       }
     }
 

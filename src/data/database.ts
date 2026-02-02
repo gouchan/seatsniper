@@ -21,13 +21,20 @@ let pool: pg.Pool | null = null;
  */
 export function getPool(): pg.Pool {
   if (!pool) {
+    // If a full connection string is provided, use it exclusively.
+    // Mixing connectionString with host/port/db causes ambiguous behaviour in pg.
+    const connectionConfig: pg.PoolConfig = config.database.url
+      ? { connectionString: config.database.url }
+      : {
+          host: config.database.host,
+          port: config.database.port,
+          database: config.database.name,
+          user: config.database.user,
+          password: config.database.password,
+        };
+
     pool = new Pool({
-      connectionString: config.database.url || undefined,
-      host: config.database.host,
-      port: config.database.port,
-      database: config.database.name,
-      user: config.database.user,
-      password: config.database.password,
+      ...connectionConfig,
       max: 10,
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 5_000,
