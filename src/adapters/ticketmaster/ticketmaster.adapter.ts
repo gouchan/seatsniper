@@ -135,9 +135,9 @@ export class TicketmasterAdapter implements IPlatformAdapter {
   private buildSearchParams(params: EventSearchParams): TicketmasterSearchParams {
     const state = config.cityStateMap[params.city.toLowerCase()];
 
-    // Ticketmaster requires ISO 8601 format with timezone
+    // Ticketmaster requires ISO 8601 format WITHOUT milliseconds: YYYY-MM-DDTHH:mm:ssZ
     const formatDateTime = (date: Date): string => {
-      return date.toISOString().replace('.000Z', 'Z');
+      return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
     };
 
     return {
