@@ -5,11 +5,12 @@
 
 ---
 
-## CURRENT STATE (as of 2026-02-01, session 4)
+## CURRENT STATE (as of 2026-02-02, session 5)
 
 ### What runs right now
 - `npm run build` compiles clean (tsup bundles 184KB ESM)
 - `npx tsc --noEmit` passes with **0 errors**
+- `npm test` — **246 tests passing, 0 failures** (Vitest 2.1.9, ~1.3s)
 - `npm start` initializes adapters + notifiers, starts monitoring loop, launches Telegram bot
 - Docker Compose starts Postgres+TimescaleDB and Redis
 - Monitoring loop polls events on priority-based schedule (2min/10min/30min)
@@ -20,7 +21,6 @@
 - Alert actions: inline buttons on alerts (🔕 Mute Event, 🔄 Refresh)
 - **Bot polling fixed** — TelegramBotService always calls `bot.launch()`
 - Auto-deactivation when users block the bot (stops wasting API cycles)
-- No tests exist (Vitest configured, zero test files)
 
 ### Telegram Bot Commands
 | Command | What it does |
@@ -58,16 +58,71 @@
 | Shutdown | **Hardened** | Double-shutdown guard, signal dedup |
 | Redis cache | NOT STARTED | Configured in Docker, zero code uses it |
 | TypeScript | **Clean** | 0 errors |
+| Test suite | **246 tests** | 11 test files, all passing |
 
 ### What DOESN'T work (blocking production)
-1. **No tests** — zero test files exist
-2. **Needs real API keys** — app can't run without at least one platform key + Telegram token
+1. **Needs real API keys** — app can't run without at least one platform key + Telegram token
 3. **No web UI** — Telegram is the only interface (by design for MVP)
 4. **Security findings still open** — SSRF, hardcoded passwords, PII in logs
 
 ---
 
 ## WHAT WAS DONE EACH SESSION
+
+### Session: 2026-02-02 (Session 5) — Test Suite & Sandbox
+
+**Changes (14 new test files + 1 bug fix):**
+
+#### Goal
+Build a full test sandbox so we can validate everything works before production — without needing real API keys, a database, or a Telegram token.
+
+#### Infrastructure
+1. **vitest.config.ts** — Created configuration with path aliases matching `tsconfig.json` (e.g., `@adapters`, `@services`, `@data`), `v8` coverage provider, 10s timeouts.
+2. **Mock Platform Adapter** (`tests/mocks/mock-adapter.ts`) — In-memory adapter implementing `IPlatformAdapter`: configurable events/listings, call tracking, failure injection via `setThrow()`.
+3. **Mock Notifier** (`tests/mocks/mock-notifier.ts`) — In-memory notifier implementing `INotifier`: captures all sent alerts, configurable success/failure/throw, recipient validation.
+4. **Test Fixtures** (`tests/mocks/fixtures.ts`) — Factory functions: `makeEvent()`, `makeListing()`, `makePremiumListing()`, `makeCheapListing()`, `makeFamilyListing()`, `makeListingBatch()`, `makeSubscription()`, `makeFamilySubscription()`, `makeAlertPayload()`, `makeHistoricalPrices()`.
+
+#### Unit Tests (8 suites, 236 assertions)
+5. **ValueEngineService** (17 tests) — Constructor validation, `calculateValueScore()` range/breakdown/recommendation/flags, `scoreListings()` batch, `getTopValuePicks()` sort, `filterByMinScore()`, `calculateAveragePrice()`.
+6. **PriceAnalyzer** (24 tests) — `analyze()` linear mapping, `analyzeHistorical()` with decay, `isHistoricalLow()` threshold, `isPriceOutlier()`.
+7. **SectionRanker** (26 tests) — Tier-to-score mapping, `getTierFromSectionName()` with keyword inference (floor/vip/pit/lower/upper/balcony/obstructed), numeric heuristics (100s→UPPER_PREMIUM, 200s→MID_TIER, 300s→UPPER_LEVEL), explicit tier map override, `isPremiumSection()`.
+8. **RowEvaluator** (26 tests) — `evaluate()` non-linear scoring, `parseRowToRank()` for numeric/letter/double-letter/GA/PIT/invalid, `isFrontRow()`, `estimateTotalRows()`.
+9. **ResalePredictor** (12 tests) — `predict()` weighted combination, `estimateROI()` confidence levels, timing sweet spot (7-30 days), input clamping.
+10. **MonitorService** (17 tests) — Subscription CRUD, pause/resume, status reporting, `scanCity()` with mock adapter, adapter failure resilience, city filtering.
+11. **TelegramFormatter** (30 tests) — `escapeMarkdown()` for all 17 MarkdownV2 special characters, `formatAlert()` content verification, `formatCompact()`.
+12. **Subscription Mapper** (7 tests) — Row mapping from snake_case DB fields to camelCase TS types, null handling for optional fields.
+
+#### E2E Dry-Run Test (1 suite, 10 assertions)
+13. **Full Pipeline Test** (`tests/e2e/dry-run.test.ts`) — Wires MonitorService with 2 mock adapters (stubhub + ticketmaster) and 1 mock notifier. Tests: discovery→scoring→alerting flow, multi-adapter merging, family seat filtering, adapter failure resilience (one fails, other works), multi-city scanning, notifier error handling, value engine integration (cheap floor beats expensive upper deck).
+
+#### Bug Found & Fixed
+14. **`parseRowToRank('GA')` returned 183 instead of 1** — The double-letter regex `^([A-Z])([A-Z])$` matched "GA" before the special case handler could run, computing `26 + 6*26 + 1 = 183`. Fix: moved special case checks (GA, PIT) before letter-based parsing in `row-evaluator.ts`.
+
+#### Test Results
+```
+Tests: 246 passed, 0 failed (11 test files)
+Duration: ~1.3s
+```
+
+#### Files Added
+```
+vitest.config.ts
+tests/mocks/mock-adapter.ts
+tests/mocks/mock-notifier.ts
+tests/mocks/fixtures.ts
+tests/unit/value-engine/value-engine.test.ts
+tests/unit/value-engine/scoring-components.test.ts
+tests/unit/value-engine/price-analyzer.test.ts    (pre-existing)
+tests/unit/value-engine/section-ranker.test.ts     (pre-existing)
+tests/unit/value-engine/row-evaluator.test.ts      (pre-existing)
+tests/unit/value-engine/resale-predictor.test.ts   (pre-existing)
+tests/unit/monitoring/monitor.service.test.ts
+tests/unit/telegram/formatter.test.ts
+tests/unit/data/subscription-mapper.test.ts
+tests/e2e/dry-run.test.ts
+```
+
+---
 
 ### Session: 2026-02-01 (Session 4) — Telegram UX Overhaul
 **Changes (3 files rewritten/upgraded):**
@@ -299,7 +354,7 @@ Sweep all code written in Session 2 for edge cases, race conditions, security ho
 5. Try `/pause` → `/resume` cycle, verify DB persistence
 
 ### Priority 2: Hardening
-1. Add Vitest tests for MonitorService, ValueEngine, Telegram bot
+1. ~~Add Vitest tests for MonitorService, ValueEngine, Telegram bot~~ **DONE (Session 5) — 246 tests**
 2. Fix remaining CRITICAL security findings (C1-C4)
 3. Add structured error handling (categorized errors from circuit-breaker.ts)
 4. Add Redis caching for event data between polls
@@ -411,5 +466,9 @@ REDIS_URL=redis://localhost:6379
 | Rate limiter | `src/utils/rate-limiter.ts` |
 | DB schema | `src/data/migrations/001_initial_schema.sql` |
 | Docker | `docker/docker-compose.yml` |
+| **Test config** | `vitest.config.ts` |
+| **Test mocks** | `tests/mocks/mock-adapter.ts`, `mock-notifier.ts`, `fixtures.ts` |
+| **Unit tests** | `tests/unit/value-engine/*.test.ts`, `monitoring/*.test.ts`, `telegram/*.test.ts`, `data/*.test.ts` |
+| **E2E tests** | `tests/e2e/dry-run.test.ts` |
 | This file | `DEVLOG.md` |
 | Full audit | `SEATSNIPER.md` |

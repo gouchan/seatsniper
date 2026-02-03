@@ -49,6 +49,15 @@ export class RowEvaluator {
       return parseInt(numericMatch[1], 10);
     }
 
+    // Handle special rows BEFORE letter-based parsing
+    // (otherwise "GA" matches double-letter regex as G*26+A = 183)
+    if (trimmed === 'GA' || trimmed === 'GENERAL ADMISSION') {
+      return 1; // GA is typically good
+    }
+    if (trimmed === 'PIT') {
+      return 1; // Pit is front
+    }
+
     // Check for single letter row (A=1, B=2, etc.)
     const letterMatch = trimmed.match(/^([A-Z])$/);
     if (letterMatch) {
@@ -61,14 +70,6 @@ export class RowEvaluator {
       const first = doubleLetterMatch[1].charCodeAt(0) - 'A'.charCodeAt(0);
       const second = doubleLetterMatch[2].charCodeAt(0) - 'A'.charCodeAt(0) + 1;
       return 26 + first * 26 + second;
-    }
-
-    // Handle special rows
-    if (trimmed === 'GA' || trimmed === 'GENERAL ADMISSION') {
-      return 1; // GA is typically good
-    }
-    if (trimmed === 'PIT') {
-      return 1; // Pit is front
     }
 
     // Unknown format
