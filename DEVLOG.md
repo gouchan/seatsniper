@@ -35,12 +35,29 @@
 | `/unsub` | Unsubscribe with confirmation dialog |
 | `/help` | Full command reference |
 
+### Telegram Bot Inline Buttons
+| Flow | Buttons |
+|------|---------|
+| `/subscribe` step 1 | City multi-select with ✅ toggles → "All Cities" / "Done (N selected)" |
+| `/subscribe` step 2 | 👤 Solo (1) \| 👥 Pair (2) \| 👨‍👩‍👧‍👦 Family (4) \| 🎉 Any |
+| `/subscribe` step 3 | 💰 $50 \| $100 \| $200 \| ♾️ No limit |
+| `/subscribe` step 4 | 🌟 85+ \| ✨ 70+ (Rec) \| 👍 55+ \| 📊 40+ |
+| `/scan` (no arg) | City selection buttons |
+| `/unsub` | ❌ Yes, unsubscribe \| ↩️ Keep my alerts |
+| **On Alerts** | 🔕 Mute Event \| 🔄 Refresh |
+
+### Potential UX Improvements (Phase 2)
+- Main menu persistent buttons: "🔍 Scan" "⚙️ Settings" "📊 Status"
+- Quick actions on `/status`: "🔍 Scan Now" "⏸️ Pause" buttons
+- Inline edit settings (vs. full re-subscribe)
+- Event type filters: "🎵 Concerts" "🏀 Sports" "🎭 Theater"
+
 ### What actually works
 | Component | Status | Notes |
 |-----------|--------|-------|
-| StubHub adapter | Works | OAuth 2.0, search events, get listings |
-| Ticketmaster adapter | Works | API key, Discovery API, listings |
-| SeatGeek adapter | Works | Events, listings, venue seat maps |
+| **Ticketmaster adapter** | ✅ LIVE | API key configured, 520+ Portland events, 1,100+ Seattle events |
+| StubHub adapter | Code ready | OAuth 2.0, requires approval — overkill for MVP |
+| SeatGeek adapter | Code ready | Events, listings, seat maps — nice-to-have Phase 2 |
 | Value Engine | Works | 5-component weighted scoring algorithm |
 | Rate limiter | Fixed | Serialized via queue (2026-01-31) |
 | Circuit breaker | Fixed | Timeout inside retry (2026-01-31) |
@@ -435,19 +452,36 @@ User ←→ Telegram Bot (9 commands, inline actions)
 
 ---
 
+## PLATFORM API COMPARISON
+
+| Feature | Ticketmaster | SeatGeek | StubHub |
+|---------|-------------|----------|---------|
+| **Status** | ✅ LIVE | Code ready | Code ready |
+| **Event Search** | ✅ Yes | ✅ Yes | ✅ Yes |
+| **Listing Prices** | ✅ Yes | ✅ Yes | ✅ Yes |
+| **Seat Maps** | Static URL | Interactive + static | ❌ None |
+| **Rate Limit** | 5,000/day | 60/min | 10/min (tight) |
+| **Auth** | API key | Client ID | OAuth 2.0 |
+| **Deal Quality Score** | ❌ | ✅ SeatGeek DQ | ❌ |
+| **Setup Effort** | ✅ Done! | Medium | High |
+
+**MVP Strategy:** Ticketmaster alone covers events + listings + pricing. SeatGeek = Phase 2 for better seat maps.
+
+---
+
 ## ENV VARS NEEDED
 
 ```bash
-# Platform APIs (need at least one)
-STUBHUB_CLIENT_ID=
-STUBHUB_CLIENT_SECRET=
-TICKETMASTER_API_KEY=
-SEATGEEK_CLIENT_ID=
-SEATGEEK_CLIENT_SECRET=     # optional
+# Platform APIs
+TICKETMASTER_API_KEY=        # ✅ Configured — from developer.ticketmaster.com
+SEATGEEK_CLIENT_ID=          # Optional Phase 2 — from seatgeek.com/build
+SEATGEEK_CLIENT_SECRET=      # Optional
+STUBHUB_CLIENT_ID=           # Optional — requires approval, overkill for MVP
+STUBHUB_CLIENT_SECRET=       # Optional
 
 # Notifications
-TELEGRAM_BOT_TOKEN=          # from @BotFather
-TELEGRAM_CHAT_ID=            # your chat ID
+TELEGRAM_BOT_TOKEN=          # ⏳ NEEDED — from @BotFather
+TELEGRAM_CHAT_ID=            # Auto-discovered on /start
 
 # Database (optional — runs in-memory without)
 DB_HOST=localhost
