@@ -5,7 +5,7 @@
 
 ---
 
-## CURRENT STATE (as of 2026-02-02, session 5)
+## CURRENT STATE (as of 2026-02-03, session 6)
 
 ### What runs right now
 - `npm run build` compiles clean (tsup bundles 184KB ESM)
@@ -61,13 +61,32 @@
 | Test suite | **246 tests** | 11 test files, all passing |
 
 ### What DOESN'T work (blocking production)
-1. **Needs real API keys** — app can't run without at least one platform key + Telegram token
+1. ~~**Needs real API keys**~~ → **DONE: Ticketmaster API working** (2026-02-03)
+2. **Telegram bot token** — still need to create bot via @BotFather
 3. **No web UI** — Telegram is the only interface (by design for MVP)
 4. **Security findings still open** — SSRF, hardcoded passwords, PII in logs
 
 ---
 
 ## WHAT WAS DONE EACH SESSION
+
+### Session: 2026-02-03 (Session 6) — Ticketmaster API Live!
+
+**Changes:**
+
+#### Ticketmaster API Integration
+1. **API Key configured** — Consumer Key from developer.ticketmaster.com now in `.env`
+2. **Bug fix: Date format** — Ticketmaster requires `YYYY-MM-DDTHH:mm:ssZ` (NO milliseconds). Fixed regex in adapter:
+   - Before: `.replace('.000Z', 'Z')` — only removed `.000`
+   - After: `.replace(/\.\d{3}Z$/, 'Z')` — removes any millisecond value
+3. **Verified working**: Portland = 520 events, Seattle = 1,102 events discovered
+
+#### Status
+- ✅ Ticketmaster adapter fully functional with real API
+- ✅ 246 tests still passing
+- ⏳ Next: Create Telegram bot token to complete the loop
+
+---
 
 ### Session: 2026-02-02 (Session 5) — Test Suite & Sandbox
 
