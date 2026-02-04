@@ -85,9 +85,13 @@ export class TelegramBotService {
     const botInfo = await this.bot.telegram.getMe();
     logger.info(`[TelegramBot] Starting @${botInfo.username}`);
 
-    // Always launch long-polling — this is the component that needs updates.
+    // Launch long-polling with dropPendingUpdates to avoid stale messages.
     // TelegramNotifier only uses bot.telegram.* API calls (no polling needed).
-    void this.bot.launch();
+    this.bot.launch({ dropPendingUpdates: true }).catch(err => {
+      logger.error('[TelegramBot] Long-polling crashed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
     this.isRunning = true;
 
     // Prune stale sessions every 5 minutes

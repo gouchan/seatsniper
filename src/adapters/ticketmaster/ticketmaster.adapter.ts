@@ -162,12 +162,21 @@ export class TicketmasterAdapter implements IPlatformAdapter {
     const startTime = Date.now();
 
     try {
-      // Note: Ticketmaster's resale offers endpoint structure varies
-      // This uses the standard Discovery API offers endpoint
+      // Ticketmaster Discovery API's offers endpoint returns 404 for most events.
+      // Catch 404 INSIDE the resilience wrapper so it doesn't trip the circuit breaker.
       const response = (await this.resilience.policy.execute(async () => {
-        return this.client.get<TicketmasterOffersResponse>(
-          `/events/${platformEventId}/offers`
-        );
+        try {
+          return await this.client.get<TicketmasterOffersResponse>(
+            `/events/${platformEventId}/offers`
+          );
+        } catch (innerError) {
+          // 404 is expected — most events don't have resale offers.
+          // Return empty rather than throwing so the circuit breaker stays healthy.
+          if (axios.isAxiosError(innerError) && innerError.response?.status === 404) {
+            return { data: { offers: [] } } as any;
+          }
+          throw innerError;
+        }
       })) as any;
 
       const listings = mapOffersToNormalized(
@@ -182,16 +191,6 @@ export class TicketmasterAdapter implements IPlatformAdapter {
 
       return listings;
     } catch (error) {
-      // 404 is expected if event has no resale offers
-      if (axios.isAxiosError(error) && error.response?.status === 404) {
-        logAdapterOperation('ticketmaster', 'get_listings', startTime, true, {
-          eventId: platformEventId,
-          listingsFound: 0,
-          note: 'No resale offers available',
-        });
-        return [];
-      }
-
       logAdapterOperation('ticketmaster', 'get_listings', startTime, false, {
         eventId: platformEventId,
         error: error instanceof Error ? error.message : 'Unknown error',
