@@ -704,6 +704,8 @@ export class MonitorService {
     events: number;
     listings: number;
     topPicks: ScoredListing[];
+    /** Up to 10 upcoming events with details (name, venue, date, price range) */
+    upcomingEvents: NormalizedEvent[];
   }> {
     const now = new Date();
     const searchParams: EventSearchParams = {
@@ -716,6 +718,7 @@ export class MonitorService {
     let totalEvents = 0;
     let totalListings = 0;
     const allScoredListings: ScoredListing[] = [];
+    const allEvents: NormalizedEvent[] = [];
 
     // Parallelize across adapters
     const adapterResults = await Promise.allSettled(
@@ -748,26 +751,32 @@ export class MonitorService {
             }
           }
 
-          return { events: events.length, listings: listingCount, scored };
+          return { events, eventCount: events.length, listings: listingCount, scored };
         } catch (error) {
           logger.warn(`[Monitor] scanCity failed for ${name}`, {
             error: error instanceof Error ? error.message : String(error),
           });
-          return { events: 0, listings: 0, scored: [] as ScoredListing[] };
+          return { events: [] as NormalizedEvent[], eventCount: 0, listings: 0, scored: [] as ScoredListing[] };
         }
       }),
     );
 
     for (const result of adapterResults) {
       if (result.status === 'fulfilled') {
-        totalEvents += result.value.events;
+        totalEvents += result.value.eventCount;
         totalListings += result.value.listings;
         allScoredListings.push(...result.value.scored);
+        allEvents.push(...result.value.events);
       }
     }
 
     const topPicks = this.valueEngine.getTopValuePicks(allScoredListings, 10);
 
-    return { events: totalEvents, listings: totalListings, topPicks };
+    // Sort events by date and return the first 10 upcoming
+    const upcomingEvents = allEvents
+      .sort((a, b) => a.dateTime.getTime() - b.dateTime.getTime())
+      .slice(0, 10);
+
+    return { events: totalEvents, listings: totalListings, topPicks, upcomingEvents };
   }
 }

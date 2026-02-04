@@ -57,6 +57,12 @@ export interface NormalizedEvent {
   imageUrl?: string;
   /** Static seat map image URL from platform (if available) */
   seatMapUrl?: string;
+  /** Price range from the platform (if available) */
+  priceRange?: {
+    min: number;
+    max: number;
+    currency: string;
+  };
 }
 
 // ============================================================================

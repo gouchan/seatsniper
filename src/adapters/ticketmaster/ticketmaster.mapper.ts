@@ -36,6 +36,12 @@ export function mapToNormalizedEvent(event: TicketmasterEvent): NormalizedEvent 
     eventDateTime = new Date(`${dateStr}T${timeStr}`);
   }
 
+  // Extract price range (Ticketmaster provides min/max for most events)
+  const priceInfo = event.priceRanges?.[0];
+  const priceRange = priceInfo
+    ? { min: priceInfo.min, max: priceInfo.max, currency: priceInfo.currency || 'USD' }
+    : undefined;
+
   return {
     platformId: event.id,
     platform: 'ticketmaster',
@@ -51,6 +57,7 @@ export function mapToNormalizedEvent(event: TicketmasterEvent): NormalizedEvent 
     url: event.url,
     imageUrl: selectBestImage(event.images),
     seatMapUrl: event.seatmap?.staticUrl,
+    priceRange,
   };
 }
 

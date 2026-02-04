@@ -48,6 +48,23 @@ const SCAN_TIMEOUT_MS = 45_000;
 type MutedEvents = Map<string, Set<string>>;
 
 // ============================================================================
+// Persistent Reply Keyboard — Main Menu Buttons
+// ============================================================================
+
+const MENU = {
+  SCAN:      '🔍 Scan',
+  SUBSCRIBE: '📋 Subscribe',
+  STATUS:    '📊 Status',
+  SETTINGS:  '⚙️ Settings',
+  PAUSE:     '⏸️ Pause Alerts',
+  RESUME:    '▶️ Resume Alerts',
+  HELP:      '❓ Help',
+} as const;
+
+/** All menu button labels for quick lookup */
+const MENU_LABELS = new Set<string>(Object.values(MENU));
+
+// ============================================================================
 // Telegram Bot Service
 // ============================================================================
 
@@ -127,6 +144,32 @@ export class TelegramBotService {
   }
 
   // ==========================================================================
+  // Persistent Reply Keyboard Helpers
+  // ==========================================================================
+
+  /** Single source of truth for the main menu keyboard layout */
+  private mainMenuKeyboard() {
+    return Markup.keyboard([
+      [MENU.SCAN, MENU.SUBSCRIBE],
+      [MENU.STATUS, MENU.SETTINGS],
+      [MENU.PAUSE, MENU.RESUME],
+      [MENU.HELP],
+    ]).resize().persistent();
+  }
+
+  /** Send a message with the main menu keyboard attached */
+  private async sendWithMainMenu(
+    ctx: TelegrafContext,
+    text: string,
+    extra?: { parse_mode?: 'MarkdownV2' },
+  ): Promise<void> {
+    await ctx.reply(text, {
+      ...extra,
+      ...this.mainMenuKeyboard(),
+    });
+  }
+
+  // ==========================================================================
   // Command Registration
   // ==========================================================================
 
@@ -169,15 +212,14 @@ export class TelegramBotService {
       `🎯 *Welcome to SeatSniper\\!*\n\n` +
       `I find the best\\-value tickets across StubHub, Ticketmaster, and SeatGeek — ` +
       `then alert you with seat map images so you know exactly where you'll sit\\.\n\n` +
-      `🏠 *Quick Start:*\n` +
-      `1\\. /subscribe — Set up your alerts\n` +
-      `2\\. /scan — One\\-shot city scan\n` +
-      `3\\. /status — Check monitoring\n` +
-      `4\\. /pause / /resume — Mute alerts temporarily\n` +
-      `5\\. /help — All commands\n\n` +
-      `_Alerts include venue seat maps, value scores, and direct buy links\\._`;
+      `*Get Started:*\n` +
+      `🔍 *Scan* — Quick scan for deals in a city\n` +
+      `📋 *Subscribe* — Set up automatic deal alerts\n` +
+      `📊 *Status* — Check monitoring activity\n` +
+      `⚙️ *Settings* — View your preferences\n\n` +
+      `_Tap a button below to begin 👇_`;
 
-    await ctx.reply(welcome, { parse_mode: 'MarkdownV2' });
+    await this.sendWithMainMenu(ctx, welcome, { parse_mode: 'MarkdownV2' });
   }
 
   // ==========================================================================
@@ -248,7 +290,7 @@ export class TelegramBotService {
     // Check if they even have a subscription
     const subs = this.monitor.getSubscriptions().filter(s => s.userId === chatId);
     if (subs.length === 0) {
-      await ctx.reply('You don\'t have an active subscription. Use /subscribe to set one up.');
+      await this.sendWithMainMenu(ctx, 'You don\'t have an active subscription. Tap 📋 Subscribe to set one up.');
       return;
     }
 
@@ -280,7 +322,7 @@ export class TelegramBotService {
 
     const paused = this.monitor.pauseSubscription(chatId);
     if (!paused) {
-      await ctx.reply('No active subscription to pause. Use /subscribe first.');
+      await this.sendWithMainMenu(ctx, 'No active subscription to pause. Tap 📋 Subscribe to set one up.');
       return;
     }
 
@@ -297,9 +339,9 @@ export class TelegramBotService {
       });
     });
 
-    await ctx.reply(
-      '⏸️ Alerts paused. Your settings are preserved.\n\n' +
-      'Use /resume when you\'re ready for alerts again.',
+    await this.sendWithMainMenu(
+      ctx,
+      '⏸️ Alerts paused. Your settings are preserved.\n\nTap ▶️ Resume Alerts when you\'re ready.',
     );
   }
 
@@ -313,7 +355,7 @@ export class TelegramBotService {
 
     const resumed = this.monitor.resumeSubscription(chatId);
     if (!resumed) {
-      await ctx.reply('No paused subscription found. Use /subscribe to set one up.');
+      await this.sendWithMainMenu(ctx, 'No paused subscription found. Tap 📋 Subscribe to set one up.');
       return;
     }
 
@@ -330,9 +372,9 @@ export class TelegramBotService {
       });
     });
 
-    await ctx.reply(
-      '▶️ Alerts resumed! You\'ll start receiving deal notifications again.\n\n' +
-      'Use /status to check monitoring activity.',
+    await this.sendWithMainMenu(
+      ctx,
+      '▶️ Alerts resumed! You\'ll start receiving deal notifications again.',
     );
   }
 
@@ -344,8 +386,8 @@ export class TelegramBotService {
     const chatId = ctx.chat?.id?.toString();
     if (!chatId) return;
 
-    const text = (ctx.message && 'text' in ctx.message) ? ctx.message.text : '';
-    const parts = text.split(/\s+/);
+    const rawText = (ctx.message && 'text' in ctx.message) ? ctx.message.text : '';
+    const parts = rawText.split(/\s+/);
     const city = parts[1]?.toLowerCase();
 
     if (!city) {
@@ -371,7 +413,7 @@ export class TelegramBotService {
     // Sanitize city input: only allow letters, spaces, hyphens
     const sanitized = city.replace(/[^a-zA-Z\s-]/g, '').trim().toLowerCase();
     if (!sanitized || sanitized.length > 50) {
-      await ctx.reply('Please enter a valid city name (letters only, max 50 chars).');
+      await this.sendWithMainMenu(ctx, 'Please enter a valid city name (letters only, max 50 chars).');
       return;
     }
 
@@ -390,22 +432,49 @@ export class TelegramBotService {
       ]);
 
       if (result.events === 0) {
-        await ctx.reply(`No events found in ${sanitized} for the next 30 days.`);
+        await this.sendWithMainMenu(ctx, `No events found in ${sanitized} for the next 30 days.`);
         return;
       }
 
+      const cityTitle = sanitized.charAt(0).toUpperCase() + sanitized.slice(1);
       let response =
-        `📊 *${this.escapeMarkdown(sanitized.charAt(0).toUpperCase() + sanitized.slice(1))} Scan Results*\n\n` +
-        `🎫 Events found: ${result.events}\n` +
-        `🎟️ Listings sampled: ${result.listings}\n` +
-        `⭐ Top picks: ${result.topPicks.length}\n\n`;
+        `📊 *${this.escapeMarkdown(cityTitle)} — ${result.events} Events Found*\n` +
+        `━━━━━━━━━━━━━━━━━━━━━\n\n`;
 
+      // Show upcoming events with details
+      if (result.upcomingEvents.length > 0) {
+        for (const evt of result.upcomingEvents) {
+          const dateStr = evt.dateTime.toLocaleDateString('en-US', {
+            weekday: 'short', month: 'short', day: 'numeric',
+          });
+          const timeStr = evt.dateTime.toLocaleTimeString('en-US', {
+            hour: 'numeric', minute: '2-digit',
+          });
+
+          const categoryIcon = this.getCategoryIcon(evt.category);
+          const priceLine = evt.priceRange
+            ? `💰 $${evt.priceRange.min}–$${evt.priceRange.max}`
+            : '💰 Price TBD';
+
+          response +=
+            `${categoryIcon} *${this.escapeMarkdown(evt.name)}*\n` +
+            `   📍 ${this.escapeMarkdown(evt.venue.name)}\n` +
+            `   📅 ${this.escapeMarkdown(dateStr + ', ' + timeStr)}\n` +
+            `   ${this.escapeMarkdown(priceLine)}` +
+            ` [Tickets](${evt.url})\n\n`;
+        }
+
+        if (result.events > result.upcomingEvents.length) {
+          response += `_\\.\\.\\. and ${result.events - result.upcomingEvents.length} more events_\n\n`;
+        }
+      }
+
+      // Show top picks if any listings were scored
       if (result.topPicks.length > 0) {
-        response += `*Best Deals:*\n`;
+        response += `🔥 *Best Deals:*\n`;
         for (const pick of result.topPicks.slice(0, 5)) {
           const l = pick.listing;
           const s = pick.score;
-          // Include buy link for each listing
           const buyLink = l.deepLink ? ` [Buy](${l.deepLink})` : '';
           response +=
             `\n${this.getScoreEmoji(s.totalScore)} *Score ${s.totalScore}/100*\n` +
@@ -416,15 +485,16 @@ export class TelegramBotService {
         }
       }
 
-      response += `\n_Use /subscribe to get alerts when great deals appear${this.escapeMarkdown('!')}_`;
+      response += `\n_Tap 📋 Subscribe for automatic deal alerts${this.escapeMarkdown('!')}_`;
 
-      await ctx.reply(response, { parse_mode: 'MarkdownV2' });
+      await this.sendWithMainMenu(ctx, response, { parse_mode: 'MarkdownV2' });
     } catch (error) {
       logger.error('[TelegramBot] Scan failed', {
         city: sanitized,
         error: error instanceof Error ? error.message : String(error),
       });
-      await ctx.reply(`❌ ${error instanceof Error ? error.message : 'Scan failed. Try again later.'}`);
+      await this.sendWithMainMenu(ctx, `❌ ${error instanceof Error ? error.message : 'Scan failed. Try again later.'}`);
+
     }
   }
 
@@ -463,7 +533,7 @@ export class TelegramBotService {
       `🟢 Low ${this.escapeMarkdown('(>30 days)')}: ${status.eventsByPriority.low}\n` +
       `⚪ Past: ${status.eventsByPriority.past}`;
 
-    await ctx.reply(msg, { parse_mode: 'MarkdownV2' });
+    await this.sendWithMainMenu(ctx, msg, { parse_mode: 'MarkdownV2' });
   }
 
   // ==========================================================================
@@ -477,7 +547,7 @@ export class TelegramBotService {
     const subs = this.monitor.getSubscriptions().filter(s => s.userId === chatId);
 
     if (subs.length === 0) {
-      await ctx.reply('No active subscriptions. Use /subscribe to set one up.');
+      await this.sendWithMainMenu(ctx, 'No active subscriptions. Tap 📋 Subscribe to set one up.');
       return;
     }
 
@@ -495,9 +565,9 @@ export class TelegramBotService {
       `${this.escapeMarkdown(budgetLine)}\n` +
       `📡 Channel: ${sub.channel}\n` +
       `${statusLine}\n\n` +
-      `_Use /subscribe to change, /pause to mute, or /unsub to remove\\._`;
+      `_Tap 📋 Subscribe to change, ⏸️ Pause to mute, or type /unsub to remove\\._`;
 
-    await ctx.reply(msg, { parse_mode: 'MarkdownV2' });
+    await this.sendWithMainMenu(ctx, msg, { parse_mode: 'MarkdownV2' });
   }
 
   // ==========================================================================
@@ -506,29 +576,26 @@ export class TelegramBotService {
 
   private async handleHelp(ctx: TelegrafContext): Promise<void> {
     const msg =
-      `🎯 *SeatSniper Commands*\n\n` +
-      `*Setup:*\n` +
-      `/subscribe — Set up deal alerts\n` +
-      `/unsub — Remove subscription\n` +
-      `/settings — View your preferences\n\n` +
-      `*Monitoring:*\n` +
-      `/scan \\[city\\] — Quick scan for deals\n` +
-      `/status — System status\n` +
-      `/pause — Mute alerts temporarily\n` +
-      `/resume — Resume alerts\n\n` +
+      `🎯 *SeatSniper Help*\n\n` +
+      `*Menu Buttons:*\n` +
+      `🔍 *Scan* — Quick scan a city for deals\n` +
+      `📋 *Subscribe* — Set up automatic alerts\n` +
+      `📊 *Status* — Check monitoring activity\n` +
+      `⚙️ *Settings* — View your preferences\n` +
+      `⏸️ *Pause* / ▶️ *Resume* — Toggle alerts\n\n` +
       `*How it works:*\n` +
       `1\\. Subscribe with city, seats, budget, and score\n` +
       `2\\. I poll StubHub, Ticketmaster, and SeatGeek\n` +
-      `3\\. When high\\-value tickets are found, I send you:\n` +
+      `3\\. When high\\-value tickets are found, I send:\n` +
       `   🗺️ Venue seat map with highlighted section\n` +
       `   💰 Value score and price analysis\n` +
       `   🛒 Direct buy link\n\n` +
       `*On each alert you can:*\n` +
       `   🔕 Mute that event\n` +
       `   🔄 Refresh prices\n\n` +
-      `_Family\\-friendly: filter by seats together and max budget\\!_`;
+      `_Slash commands also work: /scan, /subscribe, /status, /unsub_`;
 
-    await ctx.reply(msg, { parse_mode: 'MarkdownV2' });
+    await this.sendWithMainMenu(ctx, msg, { parse_mode: 'MarkdownV2' });
   }
 
   // ==========================================================================
@@ -738,10 +805,12 @@ export class TelegramBotService {
         `💰 Budget: ${this.escapeMarkdown(budgetLabel)}\n` +
         `🎯 Alert threshold: ${scoreLabel}\n\n` +
         `I'm now monitoring ticket platforms and will alert you when great deals appear\\. ` +
-        `Each alert includes a venue seat map so you can see exactly where you'd sit\\.\n\n` +
-        `_Use /settings to view, /pause to mute, or /unsub to remove\\._`,
+        `Each alert includes a venue seat map so you can see exactly where you'd sit\\.`,
         { parse_mode: 'MarkdownV2' },
       );
+
+      // Follow-up with main menu (editMessageText can't carry reply keyboards)
+      await this.sendWithMainMenu(ctx, '🎯 You\'re all set! Use the menu below to continue.');
 
       logger.info('[TelegramBot] New subscription', {
         userId: chatId,
@@ -772,14 +841,15 @@ export class TelegramBotService {
       });
 
       await ctx.editMessageText(
-        '✅ Subscription removed. You will no longer receive alerts.\n\n' +
-        'Use /subscribe to set up again anytime.',
+        '✅ Subscription removed. You will no longer receive alerts.',
       );
+      await this.sendWithMainMenu(ctx, 'Tap 📋 Subscribe to set up again anytime.');
       return;
     }
 
     if (data === 'unsub:cancel') {
       await ctx.editMessageText('👍 Your subscription is still active. Alerts will continue.');
+      await this.sendWithMainMenu(ctx, '👍 Keeping your alerts active.');
       return;
     }
 
@@ -813,15 +883,34 @@ export class TelegramBotService {
     const chatId = ctx.chat?.id?.toString();
     if (!chatId) return;
 
+    const text = (ctx.message && 'text' in ctx.message) ? ctx.message.text?.trim() : '';
+    if (!text) return;
+
+    // --- Reply keyboard button routing ---
+    // If user taps a menu button while mid-wizard, clear the session first
+    if (MENU_LABELS.has(text)) {
+      this.sessions.delete(chatId);
+
+      switch (text) {
+        case MENU.SCAN:      return this.handleScan(ctx);
+        case MENU.SUBSCRIBE: return this.handleSubscribe(ctx);
+        case MENU.STATUS:    return this.handleStatus(ctx);
+        case MENU.SETTINGS:  return this.handleSettings(ctx);
+        case MENU.PAUSE:     return this.handlePause(ctx);
+        case MENU.RESUME:    return this.handleResume(ctx);
+        case MENU.HELP:      return this.handleHelp(ctx);
+      }
+    }
+
+    // --- Active session flow (user typed text during wizard) ---
     const session = this.sessions.get(chatId);
-    if (!session || session.step === 'idle') {
-      // No active flow — show help hint
-      await ctx.reply('Use /help to see available commands, or /subscribe to get started.');
+    if (session && session.step !== 'idle') {
+      await ctx.reply('Please use the buttons above to make your selection.');
       return;
     }
 
-    // If user types text during a button-driven flow, prompt them to use buttons
-    await ctx.reply('Please use the buttons above to make your selection, or type /subscribe to restart.');
+    // --- Fallback for unrecognized text ---
+    await this.sendWithMainMenu(ctx, 'Tap a button below to get started 👇');
   }
 
   // ==========================================================================
@@ -854,6 +943,17 @@ export class TelegramBotService {
 
   private escapeMarkdown(text: string): string {
     return text.replace(/[_*[\]()~`>#+=|{}.!\\-]/g, '\\$&');
+  }
+
+  private getCategoryIcon(category: string): string {
+    const icons: Record<string, string> = {
+      concerts: '🎵',
+      sports: '🏟️',
+      theater: '🎭',
+      comedy: '😂',
+      festivals: '🎪',
+    };
+    return icons[category] || '🎫';
   }
 
   private getScoreEmoji(score: number): string {
