@@ -1,48 +1,74 @@
-# SeatSniper
+# SeatSniper 🎫
 
-Ticket intelligence platform that monitors StubHub, Ticketmaster, and SeatGeek for event tickets in the Pacific Northwest. Calculates value scores and delivers instant alerts via Telegram with seat map images, buy links, and interactive controls.
+Ticket intelligence platform that monitors Ticketmaster and SeatGeek for event tickets in the Pacific Northwest. Calculates value scores and delivers instant alerts via Telegram with seat map images, buy links, and interactive controls.
+
+## Features
+
+- **🔍 City Scan** — Browse all upcoming events in Portland or Seattle with prices
+- **🔎 Keyword Search** — Find specific events (artists, teams, shows) across all platforms
+- **📋 Smart Alerts** — Get notified when deals match your preferences (city, seats, budget, quality)
+- **🎫 Multi-Platform** — Ticketmaster live, SeatGeek ready (shows platform indicator per event)
+- **💰 Real Pricing** — See actual ticket price ranges, not just "tickets available"
+- **🤖 Telegram Bot** — Persistent button keyboard, no commands to memorize
 
 ## How It Works
-
-SeatSniper polls ticket platforms on a priority-based schedule, scores every listing through a 5-component weighted algorithm, and fires alerts when it finds deals that match your preferences — city, seat count, budget, and quality threshold.
 
 ```
 Ticket Platforms          Value Engine              Telegram Bot
 ┌────────────┐          ┌──────────────┐          ┌─────────────────────┐
-│  StubHub   │──┐       │ Price    35% │       ┌──│ /subscribe          │
-│Ticketmaster│──┼──────▶│ Section  25% │──────▶│  │ /scan [city]        │
-│  SeatGeek  │──┘       │ Row      15% │       │  │ /pause  /resume     │
-└────────────┘          │ History  15% │       │  │ /status /settings   │
-                        │ Resale   10% │       │  │ 🔕 Mute  🔄 Refresh │
-                        └──────────────┘       └──└─────────────────────┘
+│Ticketmaster│──┐       │ Price    35% │       ┌──│ 🔍 Scan  🔎 Search  │
+│  SeatGeek  │──┼──────▶│ Section  25% │──────▶│  │ 📋 Subscribe        │
+│  (StubHub) │──┘       │ Row      15% │       │  │ ⚙️ Settings ⏸️ Pause │
+└────────────┘          │ History  15% │       │  │ 🔕 Mute  🔄 Refresh │
+                        │ Resale   10% │       └──└─────────────────────┘
 ```
 
 **Target metrics:** <30s alert latency, >95% accuracy, >99.5% uptime
 
 ## Telegram Bot
 
-The primary interface is a Telegram bot with 9 commands and inline action buttons.
+The primary interface is a Telegram bot with a persistent reply keyboard — no slash commands needed.
 
-### Commands
+### Main Menu (Persistent Keyboard)
 
-| Command | Description |
-|---------|-------------|
-| `/start` | Welcome message and quick start guide |
-| `/subscribe` | 4-step setup: cities → seats → budget → score threshold |
-| `/scan [city]` | One-shot scan with buy links (typing indicator + 45s timeout) |
-| `/status` | System status + your personal subscription status |
-| `/settings` | View preferences: cities, score, quantity, budget, paused state |
-| `/pause` | Temporarily mute alerts (settings preserved) |
-| `/resume` | Resume paused alerts |
-| `/unsub` | Unsubscribe with confirmation dialog |
-| `/help` | Full command reference |
+```
+┌─────────────┬─────────────┐
+│  🔍 Scan    │  🔎 Search  │
+├─────────────┼─────────────┤
+│ 📋 Subscribe│  📊 Status  │
+├─────────────┼─────────────┤
+│ ⚙️ Settings │  ⏸️ Pause   │
+├─────────────┼─────────────┤
+│ ▶️ Resume   │  ❓ Help    │
+└─────────────┴─────────────┘
+```
+
+### What Each Button Does
+
+| Button | Description |
+|--------|-------------|
+| 🔍 Scan | Browse all events in a city (select Portland/Seattle) |
+| 🔎 Search | Find specific events by name (e.g., "Taylor Swift", "Trail Blazers") |
+| 📋 Subscribe | Set up alerts: cities → seats → budget → score threshold |
+| 📊 Status | System status + your subscription status |
+| ⚙️ Settings | View your alert preferences |
+| ⏸️ Pause | Temporarily mute alerts (settings preserved) |
+| ▶️ Resume | Resume paused alerts |
+| ❓ Help | Quick reference guide |
+
+### Scan Output
+
+Each event shows:
+- 🎵🎫 Category + platform indicator (🎫 Ticketmaster, 🪑 SeatGeek)
+- Event name, venue, date/time
+- 💰 Price range ($min–$max)
+- Direct ticket link
 
 ### Subscribe Flow
 
-The `/subscribe` command walks you through a 4-step inline keyboard flow:
-
-1. **Cities** — Multi-select with ✅ toggles, "Done (N selected)", or "All Cities"
-2. **Seats together** — Solo (1), Pair (2), Family (4), or Any
+4-step inline keyboard setup:
+1. **Cities** — Multi-select Portland, Seattle, or All
+2. **Seats together** — 1, 2, 4, or Any
 3. **Budget** — $50, $100, $200 per ticket, or no limit
 4. **Score threshold** — Excellent (85+), Good (70+), Fair (55+), or Most (40+)
 
@@ -52,14 +78,8 @@ Each alert includes:
 - 🗺️ Venue seat map with highlighted sections
 - 💰 Value score and price analysis
 - 🛒 Direct buy links to the platform
-- 🔕 **Mute Event** button — stop alerts for that specific event
-- 🔄 **Refresh** button — re-scan the city for updated prices
-
-### Setup
-
-1. Message **@BotFather** on Telegram → `/newbot` → copy your bot token
-2. Set `TELEGRAM_BOT_TOKEN=<your-token>` in `.env`
-3. Start the app and message your bot `/start`
+- 🔕 **Mute Event** — stop alerts for that specific event
+- 🔄 **Refresh** — re-scan the city for updated prices
 
 ## Value Score
 
@@ -85,7 +105,7 @@ Priority-based polling keeps you on top of the most time-sensitive events:
 | Discovery | Find new events | Every 15 minutes |
 
 Additional features:
-- **Alert deduplication** — 30-minute cooldown per event per user (in-memory + PostgreSQL)
+- **Alert deduplication** — 30-minute cooldown per event per user
 - **Budget filtering** — Only alerts for listings within your max price
 - **Quantity filtering** — Only alerts with enough consecutive seats
 - **Pause/resume** — Mute alerts without losing settings
@@ -94,98 +114,74 @@ Additional features:
 ## Tech Stack
 
 - **Runtime:** Node.js 22, TypeScript 5.7 (ESM)
-- **Build:** tsup (184KB ESM bundle)
-- **Database:** PostgreSQL 16 + TimescaleDB (auto-creates tables on startup)
-- **Cache:** Redis 7 (configured, not yet used)
+- **Build:** tsup (~195KB ESM bundle)
+- **Database:** PostgreSQL 16 + TimescaleDB (optional, auto-creates tables)
 - **Resilience:** Cockatiel (circuit breaker, retry, bulkhead, timeout)
-- **Telegram:** Telegraf v4.16.3 (shared instance for bot + notifier)
-- **SMS/WhatsApp:** Twilio SDK
-- **Infrastructure:** Docker & Docker Compose
+- **Telegram:** Telegraf v4.16.3
+- **Tests:** Vitest (256 tests)
 
 ## Getting Started
 
 ### Prerequisites
 
 - Node.js >= 22
-- Docker & Docker Compose
-- API credentials for at least one ticket platform
 - Telegram bot token (from @BotFather)
+- Ticketmaster API key (free at developer.ticketmaster.com)
+- Optional: SeatGeek API credentials, PostgreSQL
 
-### Setup
+### Quick Start
 
 ```bash
 # Install dependencies
 npm install
 
-# Copy environment template and fill in your credentials
+# Copy environment template
 cp .env.example .env
-
-# Start PostgreSQL + TimescaleDB + Redis
-npm run docker:up
+# Edit .env: add TELEGRAM_BOT_TOKEN and TICKETMASTER_API_KEY
 
 # Build and run
 npm run build
 npm start
 ```
 
-The app runs fine without PostgreSQL (in-memory fallback) — just start with `npm start`.
+The app runs without PostgreSQL (in-memory fallback).
 
 ### Environment Variables
 
-See [`.env.example`](.env.example) for the full list. Key groups:
-
-| Variable | Description |
-|----------|-------------|
-| `STUBHUB_CLIENT_ID` / `STUBHUB_CLIENT_SECRET` | StubHub OAuth 2.0 credentials |
-| `TICKETMASTER_API_KEY` | Ticketmaster Discovery API key |
-| `SEATGEEK_CLIENT_ID` / `SEATGEEK_CLIENT_SECRET` | SeatGeek API credentials |
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token from @BotFather |
-| `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` | Twilio SMS/WhatsApp credentials |
-| `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` | PostgreSQL connection (optional) |
-| `MONITORED_CITIES` | Comma-separated cities (default: `portland,seattle`) |
-
-Each platform and notification channel is optional. The app starts with whatever credentials are available.
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `TELEGRAM_BOT_TOKEN` | Yes | Telegram bot token from @BotFather |
+| `TICKETMASTER_API_KEY` | Yes | Ticketmaster Discovery API key |
+| `SEATGEEK_CLIENT_ID` | No | SeatGeek API credentials (when approved) |
+| `DATABASE_URL` | No | PostgreSQL connection (uses in-memory if not set) |
+| `MONITORED_CITIES` | No | Comma-separated cities (default: `portland,seattle`) |
 
 ## Project Structure
 
 ```
 src/
 ├── adapters/                  # Platform API integrations
-│   ├── base/                  # Shared interface + circuit breaker
-│   ├── stubhub/               # StubHub OAuth 2.0 adapter
-│   ├── ticketmaster/          # Ticketmaster Discovery API adapter
-│   └── seatgeek/              # SeatGeek API adapter
+│   ├── ticketmaster/          # Ticketmaster Discovery API
+│   └── seatgeek/              # SeatGeek API (ready for credentials)
 ├── services/
-│   ├── monitoring/            # Priority-based polling loop
-│   │   └── monitor.service.ts # Discovery, scoring, alert dispatch
-│   └── value-engine/          # Scoring algorithm
-│       └── scoring/           # Individual score components
-├── notifications/             # Alert delivery
-│   ├── telegram/              # Bot UX + notifier + formatter
-│   └── twilio/                # SMS + WhatsApp
+│   ├── monitoring/            # Priority-based polling + searchEvents
+│   └── value-engine/          # 5-component scoring algorithm
+├── notifications/
+│   └── telegram/              # Bot UX + formatter + notifier
 ├── data/
-│   ├── database.ts            # PostgreSQL connection pool
-│   ├── repositories/          # Subscription + alert log repos
-│   └── migrations/            # SQL schema (auto-created on startup)
-├── venues/                    # Seat map processing + venue registry
-├── utils/                     # Logger, rate limiter, deep link generator
-├── config/                    # Zod-validated env config
-└── index.ts                   # Entry point (SeatSniperApp)
+│   ├── database.ts            # PostgreSQL pool (optional)
+│   └── repositories/          # Subscription + alert repos
+└── index.ts                   # Entry point
 ```
 
 ## Scripts
 
 | Command | Description |
 |---------|-------------|
-| `npm run dev` | Start with hot reload |
 | `npm run build` | Compile TypeScript (tsup) |
 | `npm start` | Run compiled build |
-| `npm test` | Run tests (Vitest) |
-| `npm run test:coverage` | Tests with coverage |
-| `npm run lint` | Lint check |
-| `npm run typecheck` | TypeScript type check (`tsc --noEmit`) |
-| `npm run docker:up` | Start Docker services |
-| `npm run docker:down` | Stop Docker services |
+| `npm test` | Run 256 tests (Vitest) |
+| `npm run dev` | Start with hot reload |
 
 ## Supported Venues
 
@@ -202,40 +198,22 @@ Pre-configured seat map support for Pacific Northwest venues:
 ### Resilience
 
 All platform adapters use Cockatiel for fault tolerance:
-- **Circuit breaker:** Opens after 5 failures, 30s recovery window
+- **Circuit breaker:** Opens after 5 failures, 30s recovery
 - **Retry:** Exponential backoff, max 3 attempts
-- **Timeout:** 10s per request (inside retry, not wrapping it)
-- **Bulkhead:** Max 5 concurrent requests per platform
+- **Timeout:** 10s per request
 
 ### Rate Limiting
 
-Serialized token bucket with per-platform limits:
-- StubHub: 10 requests/minute
 - Ticketmaster: 5,000 requests/day
 - SeatGeek: 60 requests/minute
 
-### Database
+## Changelog
 
-PostgreSQL handles subscriptions and alert deduplication. Tables are auto-created on startup with automatic column migration for schema upgrades. TimescaleDB extension is available for future time-series price history.
-
-Schema:
-- `user_subscriptions` — User preferences (cities, score, quantity, budget, paused, tier)
-- `alert_log` — Deduplication and audit trail with cooldown checks
-
-### Shutdown
-
-Graceful shutdown on SIGINT/SIGTERM:
-1. Stop Telegram bot (stops long-polling)
-2. Stop monitoring loop (clears all timers)
-3. Shut down notifiers
-4. Close database pool
-5. Exit
-
-Double-shutdown guard prevents race conditions from rapid signals.
+See [`CHANGELOG.md`](CHANGELOG.md) for release history.
 
 ## Development Log
 
-See [`DEVLOG.md`](DEVLOG.md) for detailed session-by-session changelog, audit findings, and architecture decisions.
+See [`DEVLOG.md`](DEVLOG.md) for session-by-session development notes.
 
 ## License
 
