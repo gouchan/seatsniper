@@ -387,8 +387,11 @@ export class TelegramBotService {
     if (!chatId) return;
 
     const rawText = (ctx.message && 'text' in ctx.message) ? ctx.message.text : '';
-    const parts = rawText.split(/\s+/);
-    const city = parts[1]?.toLowerCase();
+
+    // If called from reply keyboard ("🔍 Scan") or bare /scan, show city picker.
+    // Only parse a city arg from "/scan <city>" — not from the button label.
+    const isSlashCommand = rawText.startsWith('/scan');
+    const city = isSlashCommand ? rawText.split(/\s+/)[1]?.toLowerCase() : undefined;
 
     if (!city) {
       const cities = config.monitoring.cities;
