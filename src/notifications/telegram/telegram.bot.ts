@@ -930,6 +930,7 @@ export class TelegramBotService {
     // --- Search city from button ---
     if (data.startsWith('search_city:')) {
       const city = data.replace('search_city:', '');
+      const session = this.sessions.get(chatId);
       const keyword = session?.pendingKeyword;
 
       if (!keyword) {

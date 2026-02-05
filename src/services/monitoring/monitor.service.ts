@@ -12,9 +12,11 @@ import type {
 import type { INotifier, TopValueListing, AlertPayload } from '../../notifications/base/notifier.interface.js';
 import { AlertType } from '../../notifications/base/notifier.interface.js';
 import { ValueEngineService } from '../value-engine/value-engine.service.js';
-import type { ScoredListing } from '../value-engine/value-score.types.js';
+import type { ScoredListing, HistoricalPrice } from '../value-engine/value-score.types.js';
 import { logger } from '../../utils/logger.js';
 import { config } from '../../config/index.js';
+import * as PriceHistoryRepo from '../../data/repositories/price-history.repository.js';
+import * as AlertRepo from '../../data/repositories/alert.repository.js';
 
 // ============================================================================
 // Types
@@ -392,6 +394,14 @@ export class MonitorService {
     const adapter = this.adapters.get(event.platform);
     if (!adapter) return;
 
+    // Skip past events
+    const daysUntilEvent = Math.ceil(
+      (event.dateTime.getTime() - Date.now()) / (24 * 60 * 60 * 1000),
+    );
+    if (daysUntilEvent < 0) {
+      return;
+    }
+
     try {
       // Fetch current listings
       const listings = await adapter.getEventListings(event.platformId);
@@ -404,17 +414,26 @@ export class MonitorService {
 
       // Calculate context for scoring
       const averagePrice = this.valueEngine.calculateAveragePrice(listings);
-      const daysUntilEvent = Math.max(
-        0,
-        Math.ceil((event.dateTime.getTime() - Date.now()) / (24 * 60 * 60 * 1000)),
-      );
+
+      // Load historical price data from DB (best-effort, falls back to empty)
+      let historicalData = new Map<string, HistoricalPrice[]>();
+      try {
+        historicalData = await PriceHistoryRepo.getEventHistoricalPrices(event.platformId);
+      } catch (err) {
+        // DB unavailable - continue with empty history
+      }
+
+      // Record current prices for future historical comparison (best-effort)
+      this.recordPriceSnapshot(event.platformId, listings).catch(() => {
+        // Ignore failures - this is non-critical
+      });
 
       // Score all listings
       const scoredListings = this.valueEngine.scoreListings(listings, {
         averagePrice,
         sectionTiers: {}, // Will use defaults from SectionRanker
-        historicalData: new Map(), // TODO: Wire up DB historical data
-        eventPopularity: 50, // Default until DB is wired up
+        historicalData,
+        eventPopularity: 50, // TODO: Calculate from tracked event interest
         daysUntilEvent,
       });
 
@@ -454,15 +473,41 @@ export class MonitorService {
     event: NormalizedEvent,
     topPicks: ScoredListing[],
   ): Promise<void> {
-    // Find matching subscribers
-    const matchingSubscribers = [...this.subscriptions.values()].filter(sub => {
+    // Find matching subscribers (basic filters first)
+    const potentialSubscribers = [...this.subscriptions.values()].filter(sub => {
       if (!sub.active) return false;
       if (sub.paused) return false;
       if (!sub.cities.some(c => c.toLowerCase() === event.venue.city.toLowerCase())) return false;
-      // Check cooldown
-      if (this.isAlertOnCooldown(event.platformId, sub.userId)) return false;
+
+      // Category filter (if specified)
+      if (sub.categories && sub.categories.length > 0) {
+        if (!sub.categories.some(c => c.toLowerCase() === event.category.toLowerCase())) {
+          return false;
+        }
+      }
+
+      // Keyword filter (if specified) - match against event name
+      if (sub.keywords && sub.keywords.length > 0) {
+        const eventNameLower = event.name.toLowerCase();
+        const hasMatch = sub.keywords.some(kw => eventNameLower.includes(kw.toLowerCase()));
+        if (!hasMatch) return false;
+      }
+
       return true;
     });
+
+    if (potentialSubscribers.length === 0) return;
+
+    // Check cooldowns asynchronously
+    const cooldownChecks = await Promise.all(
+      potentialSubscribers.map(async sub => ({
+        sub,
+        onCooldown: await this.isAlertOnCooldown(event.platformId, sub.userId),
+      })),
+    );
+    const matchingSubscribers = cooldownChecks
+      .filter(c => !c.onCooldown)
+      .map(c => c.sub);
 
     if (matchingSubscribers.length === 0) return;
 
@@ -523,7 +568,7 @@ export class MonitorService {
       try {
         const result = await notifier.sendAlert(payload);
         if (result.success) {
-          this.recordAlert(event.platformId, sub.userId, qualifyingPicks[0].score.totalScore);
+          this.recordAlert(event.platformId, sub.userId, qualifyingPicks[0].score.totalScore, sub.channel);
           logger.info(`[Monitor] Alert sent to ${sub.userId} via ${sub.channel}`, {
             event: event.name,
             picks: qualifyingPicks.length,
@@ -558,22 +603,47 @@ export class MonitorService {
   // Alert Deduplication
   // ==========================================================================
 
-  private isAlertOnCooldown(eventId: string, userId: string): boolean {
+  private async isAlertOnCooldown(eventId: string, userId: string): Promise<boolean> {
+    // Check in-memory first (faster, handles case where DB is unavailable)
     const now = Date.now();
-    return this.alertHistory.some(
+    const inMemoryCooldown = this.alertHistory.some(
       record =>
         record.eventId === eventId &&
         record.userId === userId &&
         now - record.sentAt.getTime() < this.monitorConfig.alertCooldownMs,
     );
+    if (inMemoryCooldown) return true;
+
+    // Also check DB for persistence across restarts
+    try {
+      return await AlertRepo.isAlertOnCooldown(eventId, userId, this.monitorConfig.alertCooldownMs);
+    } catch {
+      // DB unavailable - rely on in-memory only
+      return false;
+    }
   }
 
-  private recordAlert(eventId: string, userId: string, topScore: number): void {
+  private recordAlert(eventId: string, userId: string, topScore: number, channel: string): void {
+    // Record in-memory for fast deduplication
     this.alertHistory.push({
       eventId,
       userId,
       sentAt: new Date(),
       topScore,
+    });
+
+    // Persist to DB (best-effort, non-blocking)
+    AlertRepo.recordAlert({
+      eventId,
+      userId,
+      channel,
+      alertType: 'high_value',
+      topScore,
+      success: true,
+    }).catch(err => {
+      logger.warn('[Monitor] Failed to persist alert', {
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
   }
 
@@ -584,6 +654,52 @@ export class MonitorService {
 
     if (before !== this.alertHistory.length) {
       logger.debug(`[Monitor] Pruned ${before - this.alertHistory.length} alert records`);
+    }
+  }
+
+  // ==========================================================================
+  // Price History Recording
+  // ==========================================================================
+
+  /**
+   * Record current prices per section for historical tracking.
+   * Groups listings by section and records aggregate stats.
+   */
+  private async recordPriceSnapshot(
+    eventId: string,
+    listings: Array<{ section: string; pricePerTicket: number }>,
+  ): Promise<void> {
+    // Group listings by section
+    const sectionMap = new Map<string, number[]>();
+    for (const listing of listings) {
+      if (listing.pricePerTicket <= 0) continue; // Skip invalid prices
+      const prices = sectionMap.get(listing.section) || [];
+      prices.push(listing.pricePerTicket);
+      sectionMap.set(listing.section, prices);
+    }
+
+    // Build snapshot records
+    const snapshots: Array<{
+      section: string;
+      averagePrice: number;
+      lowestPrice: number;
+      highestPrice: number;
+      listingCount: number;
+    }> = [];
+
+    for (const [section, prices] of sectionMap) {
+      if (prices.length === 0) continue;
+      snapshots.push({
+        section,
+        averagePrice: prices.reduce((a, b) => a + b, 0) / prices.length,
+        lowestPrice: Math.min(...prices),
+        highestPrice: Math.max(...prices),
+        listingCount: prices.length,
+      });
+    }
+
+    if (snapshots.length > 0) {
+      await PriceHistoryRepo.recordPriceSnapshots(eventId, snapshots);
     }
   }
 
@@ -741,10 +857,18 @@ export class MonitorService {
                 Math.ceil((event.dateTime.getTime() - Date.now()) / (24 * 60 * 60 * 1000)),
               );
 
+              // Load historical data (best-effort)
+              let historicalData = new Map<string, HistoricalPrice[]>();
+              try {
+                historicalData = await PriceHistoryRepo.getEventHistoricalPrices(event.platformId);
+              } catch {
+                // DB unavailable - continue with empty history
+              }
+
               scored.push(...this.valueEngine.scoreListings(listings, {
                 averagePrice,
                 sectionTiers: {},
-                historicalData: new Map(),
+                historicalData,
                 eventPopularity: 50,
                 daysUntilEvent,
               }));

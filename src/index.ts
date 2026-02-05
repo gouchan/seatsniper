@@ -27,6 +27,7 @@ import type { INotifier } from './notifications/base/notifier.interface.js';
 import { testConnection, closePool } from './data/database.js';
 import * as SubRepo from './data/repositories/subscription.repository.js';
 import * as AlertRepo from './data/repositories/alert.repository.js';
+import * as PriceHistoryRepo from './data/repositories/price-history.repository.js';
 
 // ============================================================================
 // Application Class
@@ -72,6 +73,7 @@ export class SeatSniperApp {
         // Ensure MVP tables exist
         await SubRepo.ensureTable();
         await AlertRepo.ensureTable();
+        await PriceHistoryRepo.ensureTable();
         this.dbAvailable = true;
         logger.info('  ✓ PostgreSQL connected');
       } else {
