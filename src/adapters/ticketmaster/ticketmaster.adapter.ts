@@ -20,10 +20,10 @@ import { config } from '../../config/index.js';
 import type {
   TicketmasterPagedResponse,
   TicketmasterEventResponse,
-  TicketmasterOffersResponse,
   TicketmasterSearchParams,
+  TopPicksResponse,
 } from './ticketmaster.types.js';
-import { mapEventsToNormalized, mapOffersToNormalized } from './ticketmaster.mapper.js';
+import { mapEventsToNormalized, mapTopPicksToNormalized } from './ticketmaster.mapper.js';
 
 // ============================================================================
 // Ticketmaster Adapter Implementation
@@ -41,6 +41,7 @@ export class TicketmasterAdapter implements IPlatformAdapter {
   readonly circuitBreaker: CircuitBreakerPolicy;
 
   private client: AxiosInstance;
+  private topPicksClient: AxiosInstance;
   private rateLimiter: RateLimiter;
   private resilience: ResiliencePolicies;
 
@@ -61,9 +62,21 @@ export class TicketmasterAdapter implements IPlatformAdapter {
       this.config.rateLimit.requestsPerDay || 5000
     );
 
-    // Initialize HTTP client with API key
+    // Initialize HTTP client with API key (Discovery API)
     this.client = axios.create({
       baseURL: this.config.baseUrl,
+      timeout: this.config.timeout,
+      params: {
+        apikey: config.ticketmaster.apiKey,
+      },
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    // Initialize Top Picks API client (different base URL for individual listings)
+    this.topPicksClient = axios.create({
+      baseURL: 'https://app.ticketmaster.com/top-picks/v1',
       timeout: this.config.timeout,
       params: {
         apikey: config.ticketmaster.apiKey,
@@ -153,7 +166,7 @@ export class TicketmasterAdapter implements IPlatformAdapter {
   }
 
   // ==========================================================================
-  // Event Listings (Resale Offers)
+  // Event Listings (Top Picks API)
   // ==========================================================================
 
   async getEventListings(platformEventId: string): Promise<NormalizedListing[]> {
@@ -162,25 +175,25 @@ export class TicketmasterAdapter implements IPlatformAdapter {
     const startTime = Date.now();
 
     try {
-      // Ticketmaster Discovery API's offers endpoint returns 404 for most events.
-      // Catch 404 INSIDE the resilience wrapper so it doesn't trip the circuit breaker.
+      // Use Top Picks API for individual ticket listings
+      // This returns actual available tickets with section, row, seat numbers
       const response = (await this.resilience.policy.execute(async () => {
         try {
-          return await this.client.get<TicketmasterOffersResponse>(
-            `/events/${platformEventId}/offers`
+          return await this.topPicksClient.get<TopPicksResponse>(
+            `/events/${platformEventId}`,
+            { params: { qty: 2, sort: 'quality', size: 50 } }
           );
         } catch (innerError) {
-          // 404 is expected — most events don't have resale offers.
-          // Return empty rather than throwing so the circuit breaker stays healthy.
+          // Top Picks returns 404 for events without listings
           if (axios.isAxiosError(innerError) && innerError.response?.status === 404) {
-            return { data: { offers: [] } } as any;
+            return { data: { picks: [] } } as any;
           }
           throw innerError;
         }
       })) as any;
 
-      const listings = mapOffersToNormalized(
-        response.data.offers || [],
+      const listings = mapTopPicksToNormalized(
+        response.data.picks || [],
         platformEventId
       );
 

@@ -13,6 +13,7 @@ import type {
   TicketmasterEvent,
   TicketmasterOffer,
   TicketmasterClassification,
+  TopPicksListing,
 } from './ticketmaster.types.js';
 import { generateDeepLink } from '../../utils/deep-link-generator.js';
 
@@ -213,4 +214,63 @@ export function mapOffersToNormalized(
   return offers
     .filter(offer => offer.type === 'resale')
     .map(offer => mapToNormalizedListing(offer, eventId));
+}
+
+// ============================================================================
+// Top Picks Mapping
+// ============================================================================
+
+/**
+ * Map Top Picks listings to normalized listing format
+ * Top Picks API returns individual ticket listings with full pricing breakdown
+ */
+export function mapTopPicksToNormalized(
+  picks: TopPicksListing[],
+  eventId: string
+): NormalizedListing[] {
+  return picks.map(pick => ({
+    platformListingId: pick.id,
+    platform: 'ticketmaster',
+    eventId,
+    section: pick.section,
+    row: pick.row,
+    seatNumbers: pick.seatNumbers,
+    quantity: pick.quantity?.available || 1,
+    pricePerTicket: pick.faceValue,
+    totalPrice: pick.totalPrice,
+    fees: pick.fees,
+    deliveryType: mapTopPicksDelivery(pick.deliveryMethods),
+    sellerRating: pick.quality, // Use TM quality score as seller rating
+    deepLink: generateDeepLink({
+      platform: 'ticketmaster',
+      eventId,
+      listingId: pick.id,
+    }),
+    capturedAt: new Date(),
+  }));
+}
+
+/**
+ * Map Top Picks delivery methods to normalized delivery type
+ * Top Picks uses string array instead of objects
+ */
+function mapTopPicksDelivery(methods?: string[]): DeliveryType {
+  if (!methods?.length) return 'electronic';
+
+  const methodsLower = methods.map(m => m.toLowerCase());
+
+  if (methodsLower.some(m => m.includes('mobile') || m.includes('instant'))) {
+    return 'instant';
+  }
+  if (methodsLower.some(m => m.includes('electronic') || m.includes('digital'))) {
+    return 'electronic';
+  }
+  if (methodsLower.some(m => m.includes('willcall'))) {
+    return 'willcall';
+  }
+  if (methodsLower.some(m => m.includes('mail') || m.includes('ship'))) {
+    return 'physical';
+  }
+
+  return 'electronic';
 }

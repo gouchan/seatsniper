@@ -233,3 +233,79 @@ export function isTicketmasterError(data: unknown): data is TicketmasterError {
     ('errors' in data || 'fault' in data)
   );
 }
+
+// ============================================================================
+// Top Picks API Types (for individual ticket listings)
+// ============================================================================
+
+export interface TopPicksResponse {
+  picks: TopPicksListing[];
+  offers?: TopPicksOffer[];
+  eventDetails?: TopPicksEventDetails;
+  _embedded?: {
+    event?: TicketmasterEvent;
+  };
+}
+
+export interface TopPicksListing {
+  id: string;
+  type: string;
+  section: string;
+  row: string;
+  seatNumbers?: string[];
+  quality: number; // TM quality score (0-1)
+  listingType: 'primary' | 'resale';
+  totalPrice: number;
+  faceValue: number;
+  fees: number;
+  currency: string;
+  quantity: {
+    available: number;
+    min: number;
+    max: number;
+  };
+  deliveryMethods: string[];
+  attributes?: string[]; // e.g., ["aisle", "obstructed-view"]
+  sellerNotes?: string;
+  accessible?: boolean;
+}
+
+export interface TopPicksOffer {
+  offerId: string;
+  name: string;
+  rank: number;
+  area: {
+    id: string;
+    name: string;
+    type: string;
+  };
+  prices: {
+    total: { min: number; max: number };
+    face: { min: number; max: number };
+    fees: { min: number; max: number };
+  };
+  currency: string;
+  listingCount: number;
+}
+
+export interface TopPicksEventDetails {
+  id: string;
+  name: string;
+  venue: {
+    id: string;
+    name: string;
+    seatMapUrl?: string;
+  };
+  date: {
+    localDate: string;
+    localTime?: string;
+  };
+}
+
+export interface TopPicksSearchParams {
+  apikey?: string;
+  qty?: number; // Number of tickets (1-8)
+  sort?: 'quality' | 'price';
+  page?: number;
+  size?: number;
+}
