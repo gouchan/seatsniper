@@ -28,14 +28,17 @@ import { config } from '../../config/index.js';
 // ============================================================================
 
 interface UserSession {
-  /** Step in the subscribe flow */
-  step: 'idle' | 'awaiting_city' | 'awaiting_quantity' | 'awaiting_budget' | 'awaiting_score';
+  /** Step in the subscribe flow or search flow */
+  step: 'idle' | 'awaiting_city' | 'awaiting_quantity' | 'awaiting_budget' | 'awaiting_score'
+      | 'awaiting_search_keyword' | 'awaiting_search_city';
   /** Partially built subscription */
   pendingSub: Partial<Subscription>;
   /** Cities selected so far (for multi-city selection) */
   selectedCities: string[];
   /** When this session was created (for TTL expiry) */
   createdAt: number;
+  /** Pending keyword for search flow */
+  pendingKeyword?: string;
 }
 
 /** Sessions expire after 10 minutes of inactivity */
@@ -53,6 +56,7 @@ type MutedEvents = Map<string, Set<string>>;
 
 const MENU = {
   SCAN:      '🔍 Scan',
+  SEARCH:    '🔎 Search',
   SUBSCRIBE: '📋 Subscribe',
   STATUS:    '📊 Status',
   SETTINGS:  '⚙️ Settings',
@@ -150,10 +154,10 @@ export class TelegramBotService {
   /** Single source of truth for the main menu keyboard layout */
   private mainMenuKeyboard() {
     return Markup.keyboard([
-      [MENU.SCAN, MENU.SUBSCRIBE],
-      [MENU.STATUS, MENU.SETTINGS],
-      [MENU.PAUSE, MENU.RESUME],
-      [MENU.HELP],
+      [MENU.SCAN, MENU.SEARCH],
+      [MENU.SUBSCRIBE, MENU.STATUS],
+      [MENU.SETTINGS, MENU.PAUSE],
+      [MENU.RESUME, MENU.HELP],
     ]).resize().persistent();
   }
 
@@ -455,12 +459,13 @@ export class TelegramBotService {
           });
 
           const categoryIcon = this.getCategoryIcon(evt.category);
+          const platformIcon = this.getPlatformIndicator(evt.platform);
           const priceLine = evt.priceRange
             ? `💰 $${evt.priceRange.min}–$${evt.priceRange.max}`
             : '💰 Price TBD';
 
           response +=
-            `${categoryIcon} *${this.escapeMarkdown(evt.name)}*\n` +
+            `${categoryIcon}${platformIcon} *${this.escapeMarkdown(evt.name)}*\n` +
             `   📍 ${this.escapeMarkdown(evt.venue.name)}\n` +
             `   📅 ${this.escapeMarkdown(dateStr + ', ' + timeStr)}\n` +
             `   ${this.escapeMarkdown(priceLine)}` +
@@ -498,6 +503,96 @@ export class TelegramBotService {
       });
       await this.sendWithMainMenu(ctx, `❌ ${error instanceof Error ? error.message : 'Scan failed. Try again later.'}`);
 
+    }
+  }
+
+  // ==========================================================================
+  // /search — Search events by keyword
+  // ==========================================================================
+
+  private async handleSearch(ctx: TelegrafContext): Promise<void> {
+    const chatId = ctx.chat?.id?.toString();
+    if (!chatId) return;
+
+    this.sessions.set(chatId, {
+      step: 'awaiting_search_keyword',
+      pendingSub: {},
+      selectedCities: [],
+      createdAt: Date.now(),
+    });
+
+    await ctx.reply(
+      '🔎 What event are you looking for?\n\n' +
+      '_Example: Taylor Swift, Trail Blazers, Hamilton_',
+      { parse_mode: 'MarkdownV2' },
+    );
+  }
+
+  private async executeSearch(ctx: TelegrafContext, keyword: string, city: string): Promise<void> {
+    // Show typing indicator
+    await ctx.sendChatAction('typing');
+    await ctx.reply(`🔎 Searching for "${keyword}" in ${city}...`);
+
+    try {
+      const result = await Promise.race([
+        this.monitor.searchEvents(keyword, city),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Search timed out')), SCAN_TIMEOUT_MS),
+        ),
+      ]);
+
+      if (result.events === 0) {
+        await this.sendWithMainMenu(
+          ctx,
+          `🔎 No events found for "${keyword}" in ${city}.\n\nTry a different search term or city.`,
+        );
+        return;
+      }
+
+      const cityTitle = city.charAt(0).toUpperCase() + city.slice(1);
+      let response =
+        `🔎 *${this.escapeMarkdown(keyword)}* in ${this.escapeMarkdown(cityTitle)} — ${result.events} Events\n` +
+        `━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+      for (const evt of result.upcomingEvents) {
+        const dateStr = evt.dateTime.toLocaleDateString('en-US', {
+          weekday: 'short', month: 'short', day: 'numeric',
+        });
+        const timeStr = evt.dateTime.toLocaleTimeString('en-US', {
+          hour: 'numeric', minute: '2-digit',
+        });
+
+        const categoryIcon = this.getCategoryIcon(evt.category);
+        const platformIcon = this.getPlatformIndicator(evt.platform);
+        const priceLine = evt.priceRange
+          ? `💰 $${evt.priceRange.min}–$${evt.priceRange.max}`
+          : '💰 Price TBD';
+
+        response +=
+          `${categoryIcon}${platformIcon} *${this.escapeMarkdown(evt.name)}*\n` +
+          `   📍 ${this.escapeMarkdown(evt.venue.name)}\n` +
+          `   📅 ${this.escapeMarkdown(dateStr + ', ' + timeStr)}\n` +
+          `   ${this.escapeMarkdown(priceLine)}` +
+          ` [Tickets](${evt.url})\n\n`;
+      }
+
+      if (result.events > result.upcomingEvents.length) {
+        response += `_\\.\\.\\. and ${result.events - result.upcomingEvents.length} more events_\n\n`;
+      }
+
+      response += `\n_Tap 📋 Subscribe for automatic deal alerts${this.escapeMarkdown('!')}_`;
+
+      await this.sendWithMainMenu(ctx, response, { parse_mode: 'MarkdownV2' });
+    } catch (error) {
+      logger.error('[TelegramBot] Search failed', {
+        keyword,
+        city,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await this.sendWithMainMenu(
+        ctx,
+        `❌ ${error instanceof Error ? error.message : 'Search failed. Try again later.'}`,
+      );
     }
   }
 
@@ -832,6 +927,21 @@ export class TelegramBotService {
       return;
     }
 
+    // --- Search city from button ---
+    if (data.startsWith('search_city:')) {
+      const city = data.replace('search_city:', '');
+      const keyword = session?.pendingKeyword;
+
+      if (!keyword) {
+        await this.sendWithMainMenu(ctx, 'Search session expired. Tap 🔎 Search to try again.');
+        return;
+      }
+
+      this.sessions.delete(chatId);
+      await this.executeSearch(ctx, keyword, city);
+      return;
+    }
+
     // --- Unsub confirmation ---
     if (data === 'unsub:confirm') {
       this.monitor.removeSubscription(chatId);
@@ -896,6 +1006,7 @@ export class TelegramBotService {
 
       switch (text) {
         case MENU.SCAN:      return this.handleScan(ctx);
+        case MENU.SEARCH:    return this.handleSearch(ctx);
         case MENU.SUBSCRIBE: return this.handleSubscribe(ctx);
         case MENU.STATUS:    return this.handleStatus(ctx);
         case MENU.SETTINGS:  return this.handleSettings(ctx);
@@ -905,8 +1016,31 @@ export class TelegramBotService {
       }
     }
 
-    // --- Active session flow (user typed text during wizard) ---
+    // --- Search flow: user typed a keyword ---
     const session = this.sessions.get(chatId);
+    if (session?.step === 'awaiting_search_keyword') {
+      const keyword = text.trim();
+      if (keyword.length < 2 || keyword.length > 100) {
+        await ctx.reply('Please enter a search term (2–100 characters).');
+        return;
+      }
+
+      session.pendingKeyword = keyword;
+      session.step = 'awaiting_search_city';
+
+      const cities = config.monitoring.cities;
+      const buttons = cities.map(c => [
+        Markup.button.callback(
+          c.charAt(0).toUpperCase() + c.slice(1),
+          `search_city:${c}`,
+        ),
+      ]);
+
+      await ctx.reply('📍 Which city?', Markup.inlineKeyboard(buttons));
+      return;
+    }
+
+    // --- Active session flow (user typed text during wizard) ---
     if (session && session.step !== 'idle') {
       await ctx.reply('Please use the buttons above to make your selection.');
       return;
@@ -957,6 +1091,16 @@ export class TelegramBotService {
       festivals: '🎪',
     };
     return icons[category] || '🎫';
+  }
+
+  private getPlatformIndicator(platform: string): string {
+    const indicators: Record<string, string> = {
+      ticketmaster: '🎫',
+      seatgeek: '🪑',
+      stubhub: '🎟️',
+      vividseats: '💜',
+    };
+    return indicators[platform] || '';
   }
 
   private getScoreEmoji(score: number): string {

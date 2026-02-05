@@ -24,6 +24,17 @@ import { generateDeepLink } from '../../utils/deep-link-generator.js';
  * Map SeatGeek event to normalized event format
  */
 export function mapToNormalizedEvent(event: SeatGeekEvent): NormalizedEvent {
+  // Extract price range from SeatGeek stats (comes free with every event search)
+  // Only populate if real listings exist (lowest_price > 0)
+  const priceRange =
+    event.stats?.lowest_price > 0 && event.stats?.highest_price > 0
+      ? {
+          min: event.stats.lowest_price,
+          max: event.stats.highest_price,
+          currency: 'USD',
+        }
+      : undefined;
+
   return {
     platformId: event.id.toString(),
     platform: 'seatgeek',
@@ -39,6 +50,7 @@ export function mapToNormalizedEvent(event: SeatGeekEvent): NormalizedEvent {
     url: event.url,
     imageUrl: selectBestImage(event.performers),
     seatMapUrl: event.venue.seating_chart_url_large || event.venue.seating_chart_url,
+    priceRange,
   };
 }
 

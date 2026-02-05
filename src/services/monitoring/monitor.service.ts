@@ -779,4 +779,54 @@ export class MonitorService {
 
     return { events: totalEvents, listings: totalListings, topPicks, upcomingEvents };
   }
+
+  /**
+   * Search for events by keyword in a specific city
+   */
+  async searchEvents(keyword: string, city: string): Promise<{
+    events: number;
+    upcomingEvents: NormalizedEvent[];
+  }> {
+    const now = new Date();
+    const searchParams: EventSearchParams = {
+      city,
+      startDate: now,
+      endDate: new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000), // 90 days out for search
+      keyword,
+      limit: 20,
+    };
+
+    const allEvents: NormalizedEvent[] = [];
+
+    // Parallelize across adapters
+    const adapterResults = await Promise.allSettled(
+      [...this.adapters.entries()].map(async ([name, adapter]) => {
+        try {
+          const events = await adapter.searchEvents(searchParams);
+          logger.debug(`[Monitor] ${name} found ${events.length} events for "${keyword}" in ${city}`);
+          return events;
+        } catch (error) {
+          logger.warn(`[Monitor] searchEvents failed for ${name}`, {
+            keyword,
+            city,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return [] as NormalizedEvent[];
+        }
+      }),
+    );
+
+    for (const result of adapterResults) {
+      if (result.status === 'fulfilled') {
+        allEvents.push(...result.value);
+      }
+    }
+
+    // Sort by date and return up to 10
+    const upcomingEvents = allEvents
+      .sort((a, b) => a.dateTime.getTime() - b.dateTime.getTime())
+      .slice(0, 10);
+
+    return { events: allEvents.length, upcomingEvents };
+  }
 }
