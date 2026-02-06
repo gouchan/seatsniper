@@ -19,6 +19,7 @@
 import { Telegraf, Markup } from 'telegraf';
 import type { Context as TelegrafContext } from 'telegraf';
 import type { MonitorService, Subscription } from '../../services/monitoring/monitor.service.js';
+import type { NormalizedEvent, NormalizedListing } from '../../adapters/base/platform-adapter.interface.js';
 import * as SubRepo from '../../data/repositories/subscription.repository.js';
 import { logger } from '../../utils/logger.js';
 import { config } from '../../config/index.js';
@@ -449,6 +450,9 @@ export class TelegramBotService {
         `━━━━━━━━━━━━━━━━━━━━━\n\n`;
 
       // Show upcoming events with details
+      // Build inline buttons for each event (View Tickets)
+      const eventButtons: ReturnType<typeof Markup.button.callback>[][] = [];
+
       if (result.upcomingEvents.length > 0) {
         for (const evt of result.upcomingEvents) {
           const dateStr = evt.dateTime.toLocaleDateString('en-US', {
@@ -468,8 +472,17 @@ export class TelegramBotService {
             `${categoryIcon}${platformIcon} *${this.escapeMarkdown(evt.name)}*\n` +
             `   📍 ${this.escapeMarkdown(evt.venue.name)}\n` +
             `   📅 ${this.escapeMarkdown(dateStr + ', ' + timeStr)}\n` +
-            `   ${this.escapeMarkdown(priceLine)}` +
-            ` [Tickets](${evt.url})\n\n`;
+            `   ${this.escapeMarkdown(priceLine)}\n\n`;
+
+          // Add "View Tickets" button for this event (truncate name for button)
+          const shortName = evt.name.length > 20 ? evt.name.slice(0, 20) + '...' : evt.name;
+          eventButtons.push([
+            Markup.button.callback(
+              `🎟️ ${shortName}`,
+              `tickets:${evt.platform}:${evt.platformId}`,
+            ),
+            Markup.button.url('🔗 Buy', evt.url),
+          ]);
         }
 
         if (result.events > result.upcomingEvents.length) {
@@ -493,16 +506,25 @@ export class TelegramBotService {
         }
       }
 
-      response += `\n_Tap 📋 Subscribe for automatic deal alerts${this.escapeMarkdown('!')}_`;
+      response += `\n_Tap 🎟️ to see available tickets, or 📋 Subscribe for alerts${this.escapeMarkdown('!')}_`;
 
-      await this.sendWithMainMenu(ctx, response, { parse_mode: 'MarkdownV2' });
+      // Send with inline buttons if we have events
+      if (eventButtons.length > 0) {
+        await ctx.reply(response, {
+          parse_mode: 'MarkdownV2',
+          ...Markup.inlineKeyboard(eventButtons),
+        });
+        // Follow up with the main menu keyboard
+        await this.sendWithMainMenu(ctx, '👆 Tap an event above to see tickets');
+      } else {
+        await this.sendWithMainMenu(ctx, response, { parse_mode: 'MarkdownV2' });
+      }
     } catch (error) {
       logger.error('[TelegramBot] Scan failed', {
         city: sanitized,
         error: error instanceof Error ? error.message : String(error),
       });
       await this.sendWithMainMenu(ctx, `❌ ${error instanceof Error ? error.message : 'Scan failed. Try again later.'}`);
-
     }
   }
 
@@ -554,6 +576,9 @@ export class TelegramBotService {
         `🔎 *${this.escapeMarkdown(keyword)}* in ${this.escapeMarkdown(cityTitle)} — ${result.events} Events\n` +
         `━━━━━━━━━━━━━━━━━━━━━\n\n`;
 
+      // Build inline buttons for each event
+      const eventButtons: ReturnType<typeof Markup.button.callback>[][] = [];
+
       for (const evt of result.upcomingEvents) {
         const dateStr = evt.dateTime.toLocaleDateString('en-US', {
           weekday: 'short', month: 'short', day: 'numeric',
@@ -572,17 +597,35 @@ export class TelegramBotService {
           `${categoryIcon}${platformIcon} *${this.escapeMarkdown(evt.name)}*\n` +
           `   📍 ${this.escapeMarkdown(evt.venue.name)}\n` +
           `   📅 ${this.escapeMarkdown(dateStr + ', ' + timeStr)}\n` +
-          `   ${this.escapeMarkdown(priceLine)}` +
-          ` [Tickets](${evt.url})\n\n`;
+          `   ${this.escapeMarkdown(priceLine)}\n\n`;
+
+        // Add "View Tickets" button
+        const shortName = evt.name.length > 20 ? evt.name.slice(0, 20) + '...' : evt.name;
+        eventButtons.push([
+          Markup.button.callback(
+            `🎟️ ${shortName}`,
+            `tickets:${evt.platform}:${evt.platformId}`,
+          ),
+          Markup.button.url('🔗 Buy', evt.url),
+        ]);
       }
 
       if (result.events > result.upcomingEvents.length) {
         response += `_\\.\\.\\. and ${result.events - result.upcomingEvents.length} more events_\n\n`;
       }
 
-      response += `\n_Tap 📋 Subscribe for automatic deal alerts${this.escapeMarkdown('!')}_`;
+      response += `\n_Tap 🎟️ to see available tickets${this.escapeMarkdown('!')}_`;
 
-      await this.sendWithMainMenu(ctx, response, { parse_mode: 'MarkdownV2' });
+      // Send with inline buttons
+      if (eventButtons.length > 0) {
+        await ctx.reply(response, {
+          parse_mode: 'MarkdownV2',
+          ...Markup.inlineKeyboard(eventButtons),
+        });
+        await this.sendWithMainMenu(ctx, '👆 Tap an event above to see tickets');
+      } else {
+        await this.sendWithMainMenu(ctx, response, { parse_mode: 'MarkdownV2' });
+      }
     } catch (error) {
       logger.error('[TelegramBot] Search failed', {
         keyword,
@@ -967,6 +1010,17 @@ export class TelegramBotService {
       return;
     }
 
+    // --- View tickets for an event ---
+    if (data.startsWith('tickets:')) {
+      const parts = data.split(':');
+      if (parts.length >= 3) {
+        const platform = parts[1];
+        const eventId = parts.slice(2).join(':'); // Handle IDs with colons
+        await this.handleViewTickets(ctx, platform, eventId);
+      }
+      return;
+    }
+
     // --- Alert action: Mute event ---
     if (data.startsWith('mute:')) {
       const eventId = data.replace('mute:', '');
@@ -1049,6 +1103,81 @@ export class TelegramBotService {
 
     // --- Fallback for unrecognized text ---
     await this.sendWithMainMenu(ctx, 'Tap a button below to get started 👇');
+  }
+
+  // ==========================================================================
+  // View Tickets — Fetch and display listings for an event
+  // ==========================================================================
+
+  private async handleViewTickets(
+    ctx: TelegrafContext,
+    platform: string,
+    eventId: string,
+  ): Promise<void> {
+    await ctx.sendChatAction('typing');
+
+    try {
+      const listings = await this.monitor.getListingsForEvent(platform, eventId);
+
+      if (listings.length === 0) {
+        await ctx.answerCbQuery('No tickets available right now');
+        await this.sendWithMainMenu(
+          ctx,
+          `🎟️ No tickets currently listed for this event\\.\n\n_Check back later or tap the 🔗 Buy link to see the official page\\._`,
+          { parse_mode: 'MarkdownV2' },
+        );
+        return;
+      }
+
+      // Sort by price (cheapest first)
+      const sortedListings = [...listings].sort(
+        (a, b) => a.pricePerTicket - b.pricePerTicket,
+      );
+
+      // Take top 10 listings
+      const topListings = sortedListings.slice(0, 10);
+
+      let response = `🎟️ *Available Tickets* \\(${listings.length} total\\)\n`;
+      response += `━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+      for (const listing of topListings) {
+        const section = this.escapeMarkdown(listing.section || 'General');
+        const row = listing.row ? `, Row ${this.escapeMarkdown(listing.row)}` : '';
+        const seats = listing.seatNumbers?.length
+          ? ` \\(Seats ${this.escapeMarkdown(listing.seatNumbers.join(', '))}\\)`
+          : '';
+        const qty = listing.quantity > 1 ? ` — ${listing.quantity} tickets` : '';
+        const fees = listing.fees > 0 ? ` \\+$${listing.fees.toFixed(0)} fees` : '';
+
+        response += `📍 *${section}*${row}${seats}${qty}\n`;
+        response += `   💰 $${listing.pricePerTicket.toFixed(0)}/ea${fees}\n`;
+
+        if (listing.deepLink) {
+          response += `   [Buy Now](${listing.deepLink})\n`;
+        }
+        response += `\n`;
+      }
+
+      if (listings.length > 10) {
+        response += `_\\.\\.\\. and ${listings.length - 10} more listings_\n\n`;
+      }
+
+      // Show price summary
+      const minPrice = Math.min(...listings.map(l => l.pricePerTicket));
+      const maxPrice = Math.max(...listings.map(l => l.pricePerTicket));
+      response += `💵 Price range: $${minPrice.toFixed(0)} – $${maxPrice.toFixed(0)}`;
+
+      await ctx.answerCbQuery(`Found ${listings.length} tickets`);
+      await this.sendWithMainMenu(ctx, response, { parse_mode: 'MarkdownV2' });
+    } catch (error) {
+      logger.error('[TelegramBot] View tickets failed', {
+        platform,
+        eventId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await ctx.answerCbQuery('Failed to load tickets');
+      await this.sendWithMainMenu(ctx, '❌ Failed to load tickets. Try again later.');
+    }
   }
 
   // ==========================================================================

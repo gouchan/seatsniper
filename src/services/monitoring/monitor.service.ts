@@ -7,6 +7,7 @@
 import type {
   IPlatformAdapter,
   NormalizedEvent,
+  NormalizedListing,
   EventSearchParams,
 } from '../../adapters/base/platform-adapter.interface.js';
 import type { INotifier, TopValueListing, AlertPayload } from '../../notifications/base/notifier.interface.js';
@@ -17,6 +18,9 @@ import { logger } from '../../utils/logger.js';
 import { config } from '../../config/index.js';
 import * as PriceHistoryRepo from '../../data/repositories/price-history.repository.js';
 import * as AlertRepo from '../../data/repositories/alert.repository.js';
+import * as EventGroupRepo from '../../data/repositories/event-group.repository.js';
+import { matchEvents, findMatchesForEvent, type EventMatch } from '../matching/event-matching.service.js';
+import { comparePrices, type EventComparison } from '../value-engine/price-comparator.js';
 
 // ============================================================================
 // Types
@@ -99,6 +103,7 @@ export class MonitorService {
   private alertHistory: AlertRecord[] = [];
   private subscriptions: Map<string, Subscription> = new Map(); // keyed by userId
   private activeCycles: Set<string> = new Set(); // guards against overlapping cycles
+  private eventMatches: Map<string, EventMatch> = new Map(); // groupId -> match
 
   constructor(
     adapters: Map<string, IPlatformAdapter>,
@@ -288,11 +293,59 @@ export class MonitorService {
         }
       }
 
+      // Run cross-platform matching on all discovered events
+      if (allEvents.length > 0) {
+        await this.runEventMatching(allEvents);
+      }
+
       logger.info('[Monitor] Discovery complete', {
         totalTracked: this.trackedEvents.size,
+        crossPlatformMatches: this.eventMatches.size,
       });
     } finally {
       this.activeCycles.delete('discovery');
+    }
+  }
+
+  /**
+   * Match events across platforms and persist groups
+   */
+  private async runEventMatching(events: NormalizedEvent[]): Promise<void> {
+    const matches = matchEvents(events);
+
+    for (const match of matches) {
+      this.eventMatches.set(match.groupId, match);
+
+      // Persist to database (best-effort)
+      try {
+        const members = Array.from(match.events.entries()).map(([platform, event]) => ({
+          platform,
+          platformEventId: event.platformId,
+        }));
+
+        await EventGroupRepo.upsertEventGroup({
+          groupId: match.groupId,
+          canonicalName: match.canonicalName,
+          venueName: match.venueName,
+          eventDate: match.eventDate,
+          members,
+        });
+      } catch (err) {
+        // Non-fatal - matching still works in-memory
+        logger.debug('[Monitor] Failed to persist event group', {
+          groupId: match.groupId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    if (matches.length > 0) {
+      logger.info('[Monitor] Cross-platform matches found', {
+        matchCount: matches.length,
+        avgConfidence: Math.round(
+          matches.reduce((sum, m) => sum + m.confidence, 0) / matches.length,
+        ),
+      });
     }
   }
 
@@ -546,6 +599,32 @@ export class MonitorService {
 
       if (qualifyingPicks.length === 0) continue;
 
+      // Get cross-platform comparison (best-effort)
+      let crossPlatformComparison: AlertPayload['crossPlatformComparison'];
+      try {
+        const comparison = await this.getCrossPlatformComparison(event);
+        if (comparison && comparison.platformsCompared.length >= 2) {
+          crossPlatformComparison = {
+            platformsCompared: comparison.platformsCompared,
+            sections: comparison.sections.map(s => ({
+              section: s.section,
+              prices: s.prices.map(p => ({ platform: p.platform, price: p.price, url: p.url })),
+              bestDeal: s.bestDeal ? {
+                platform: s.bestDeal.platform,
+                price: s.bestDeal.price,
+                savings: s.bestDeal.savings,
+              } : null,
+            })),
+            overallBestDeal: comparison.overallBestDeal,
+          };
+        }
+      } catch (err) {
+        // Non-fatal - continue without comparison
+        logger.debug('[Monitor] Cross-platform comparison failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
       // Build alert payload
       const payload: AlertPayload = {
         userId: sub.userId,
@@ -556,6 +635,7 @@ export class MonitorService {
         listings: qualifyingPicks.map((sp, idx) => this.scoredToAlertListing(sp, idx + 1)),
         alertType: AlertType.HIGH_VALUE,
         seatMapUrl,
+        crossPlatformComparison,
       };
 
       // Send via the appropriate notifier
@@ -756,6 +836,54 @@ export class MonitorService {
   }
 
   // ==========================================================================
+  // Cross-Platform Comparison
+  // ==========================================================================
+
+  /**
+   * Get cross-platform price comparison for an event.
+   * Returns null if no cross-platform matches exist.
+   */
+  async getCrossPlatformComparison(event: NormalizedEvent): Promise<EventComparison | null> {
+    // Find matches for this event
+    const allTrackedEvents = [...this.trackedEvents.values()].map(t => t.event);
+    const match = findMatchesForEvent(event, allTrackedEvents);
+
+    if (!match || match.events.size < 2) {
+      return null;
+    }
+
+    // Fetch listings from each platform
+    const platformListings = new Map<string, { event: NormalizedEvent; listings: any[] }>();
+
+    for (const [platform, matchedEvent] of match.events) {
+      const adapter = this.adapters.get(platform);
+      if (!adapter) continue;
+
+      try {
+        const listings = await adapter.getEventListings(matchedEvent.platformId);
+        platformListings.set(platform, { event: matchedEvent, listings });
+      } catch (err) {
+        logger.debug(`[Monitor] Failed to fetch listings from ${platform} for comparison`, {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    if (platformListings.size < 2) {
+      return null;
+    }
+
+    return comparePrices(platformListings);
+  }
+
+  /**
+   * Get cross-platform matches for display
+   */
+  getEventMatches(): EventMatch[] {
+    return [...this.eventMatches.values()];
+  }
+
+  // ==========================================================================
   // Helpers
   // ==========================================================================
 
@@ -902,6 +1030,31 @@ export class MonitorService {
       .slice(0, 10);
 
     return { events: totalEvents, listings: totalListings, topPicks, upcomingEvents };
+  }
+
+  /**
+   * Get listings for a specific event (for on-demand "View Tickets" feature)
+   */
+  async getListingsForEvent(
+    platform: string,
+    eventId: string,
+  ): Promise<NormalizedListing[]> {
+    const adapter = this.adapters.get(platform);
+    if (!adapter) {
+      logger.warn(`[Monitor] No adapter for platform: ${platform}`);
+      return [];
+    }
+
+    try {
+      const listings = await adapter.getEventListings(eventId);
+      logger.debug(`[Monitor] Fetched ${listings.length} listings for ${platform}:${eventId}`);
+      return listings;
+    } catch (error) {
+      logger.warn(`[Monitor] Failed to get listings for ${platform}:${eventId}`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return [];
+    }
   }
 
   /**
