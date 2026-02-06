@@ -114,11 +114,25 @@ Additional features:
 ## Tech Stack
 
 - **Runtime:** Node.js 22, TypeScript 5.7 (ESM)
-- **Build:** tsup (~195KB ESM bundle)
+- **Build:** tsup (~200KB ESM bundle)
 - **Database:** PostgreSQL 16 + TimescaleDB (optional, auto-creates tables)
 - **Resilience:** Cockatiel (circuit breaker, retry, bulkhead, timeout)
 - **Telegram:** Telegraf v4.16.3
-- **Tests:** Vitest (256 tests)
+- **Tests:** Vitest (274 tests)
+
+## Project Status
+
+**Completion: ~82%** — Functional MVP with known gaps.
+
+| Category | Status |
+|----------|--------|
+| Telegram Bot UX | ✅ 85% — All flows work |
+| Value Engine | ✅ 85% — Historical pricing now wired |
+| Subscription Flow | ✅ 90% — Category/keyword filtering implemented |
+| Error Handling | ⚠️ 70% — Circuit breaker not user-visible |
+| Test Coverage | ⚠️ 65% — Gaps in critical paths |
+
+See [DEVLOG.md](DEVLOG.md) for detailed session notes.
 
 ## Getting Started
 

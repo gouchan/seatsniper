@@ -5,12 +5,14 @@
 
 ---
 
-## CURRENT STATE (as of 2026-02-03, session 6)
+## CURRENT STATE (as of 2026-02-05, session 8)
+
+**Completion: ~82%** (up from 72%)
 
 ### What runs right now
-- `npm run build` compiles clean (tsup bundles 184KB ESM)
+- `npm run build` compiles clean (tsup bundles 200KB ESM)
 - `npx tsc --noEmit` passes with **0 errors**
-- `npm test` — **246 tests passing, 0 failures** (Vitest 2.1.9, ~1.3s)
+- `npm test` — **274 tests passing, 0 failures** (Vitest 2.1.9, ~1.3s)
 - `npm start` initializes adapters + notifiers, starts monitoring loop, launches Telegram bot
 - Docker Compose starts Postgres+TimescaleDB and Redis
 - Monitoring loop polls events on priority-based schedule (2min/10min/30min)
@@ -86,6 +88,33 @@
 ---
 
 ## WHAT WAS DONE EACH SESSION
+
+### Session: 2026-02-05 (Session 8) — Critical Bug Fixes + Historical Pricing
+
+**Completion: 72% → 82%**
+
+#### Bugs Fixed
+1. **Search flow crash** — `session` variable undefined in telegram.bot.ts:933 when selecting city in search results
+2. **Past events still scored** — Events with negative `daysUntilEvent` now skipped early in `processEvent()`
+3. **Alert history lost on restart** — Alert deduplication now persists to PostgreSQL, checks both memory and DB
+
+#### Features Implemented
+4. **Historical price tracking** — New `price_history` table + `price-history.repository.ts`. Records price snapshots per section during each poll. Value engine now uses real historical data (was always returning neutral 50 score).
+5. **Category/keyword filtering** — Subscription fields `categories[]` and `keywords[]` now actually filter events. Users can subscribe to "Taylor Swift" or "sports only".
+
+#### Files Changed
+- `src/notifications/telegram/telegram.bot.ts` — Added missing `session` variable
+- `src/services/monitoring/monitor.service.ts` — Past event filter, historical data wiring, alert persistence, category/keyword filtering
+- `src/data/repositories/price-history.repository.ts` — NEW: price snapshot storage
+- `src/index.ts` — Initialize price history table on startup
+
+#### Remaining for Production
+- Test coverage for new code paths (~65% covered)
+- StubHub/SeatGeek integration tests
+- Circuit breaker/rate limit visibility to users
+- Observability/metrics
+
+---
 
 ### Session: 2026-02-03 (Session 6) — Ticketmaster API Live!
 

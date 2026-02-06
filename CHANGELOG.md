@@ -4,6 +4,22 @@ All notable changes to SeatSniper are documented here.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-02-05
+
+### Added
+- **📊 Historical Price Tracking** — New `price_history` table records price snapshots per section during each poll cycle. Value engine now uses real historical data for the 15% "historical pricing" score component.
+- **🔑 Category/Keyword Filtering** — Subscriptions can now filter by event category (concerts, sports, etc.) and keywords (artist/team names). Previously these fields existed but were never checked.
+
+### Fixed
+- **🔴 Search Flow Crash** — Fixed undefined `session` variable in telegram.bot.ts that caused crashes when selecting city in search results
+- **⏰ Past Events Still Scored** — Events with `daysUntilEvent < 0` are now skipped early in `processEvent()` instead of being scored with clamped values
+- **💾 Alert History Persistence** — Alert deduplication now persists to PostgreSQL and survives app restarts. Previously in-memory only, causing duplicate alerts after restart.
+- **🔄 Async Cooldown Check** — `isAlertOnCooldown()` now checks both in-memory cache AND database for accurate deduplication
+
+### Changed
+- Test count: 274 tests passing (unchanged)
+- Bundle size: 200KB ESM (up from 194KB due to new price history module)
+
 ## [0.3.0] - 2026-02-05
 
 ### Added
