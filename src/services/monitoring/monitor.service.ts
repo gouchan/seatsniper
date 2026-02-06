@@ -964,19 +964,24 @@ export class MonitorService {
     const allScoredListings: ScoredListing[] = [];
     const allEvents: NormalizedEvent[] = [];
 
+    logger.info(`[Monitor] scanCity starting for "${city}"`, { searchParams });
+
     // Parallelize across adapters
     const adapterResults = await Promise.allSettled(
       [...this.adapters.entries()].map(async ([name, adapter]) => {
         try {
+          logger.debug(`[Monitor] scanCity calling ${name}.searchEvents`);
           const events = await adapter.searchEvents(searchParams);
+          logger.info(`[Monitor] scanCity ${name} returned ${events.length} events`);
           let listingCount = 0;
           const scored: ScoredListing[] = [];
 
-          // Sample first few events for listings
+          // Sample first few events for listings (best-effort, don't fail if unavailable)
           const sampleEvents = events.slice(0, 3);
           for (const event of sampleEvents) {
-            const listings = await adapter.getEventListings(event.platformId);
-            listingCount += listings.length;
+            try {
+              const listings = await adapter.getEventListings(event.platformId);
+              listingCount += listings.length;
 
             if (listings.length > 0) {
               const averagePrice = this.valueEngine.calculateAveragePrice(listings);
@@ -1001,12 +1006,19 @@ export class MonitorService {
                 daysUntilEvent,
               }));
             }
+            } catch (listingError) {
+              // Listing fetch failed - continue with events only
+              logger.debug(`[Monitor] Could not fetch listings for ${event.platformId}`, {
+                error: listingError instanceof Error ? listingError.message : String(listingError),
+              });
+            }
           }
 
           return { events, eventCount: events.length, listings: listingCount, scored };
         } catch (error) {
-          logger.warn(`[Monitor] scanCity failed for ${name}`, {
+          logger.error(`[Monitor] scanCity failed for ${name}`, {
             error: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? error.stack : undefined,
           });
           return { events: [] as NormalizedEvent[], eventCount: 0, listings: 0, scored: [] as ScoredListing[] };
         }

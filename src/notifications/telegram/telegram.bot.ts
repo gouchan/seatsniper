@@ -476,13 +476,17 @@ export class TelegramBotService {
 
           // Add "View Tickets" button for this event (truncate name for button)
           const shortName = evt.name.length > 20 ? evt.name.slice(0, 20) + '...' : evt.name;
-          eventButtons.push([
+          const buttonRow: ReturnType<typeof Markup.button.callback>[] = [
             Markup.button.callback(
               `🎟️ ${shortName}`,
               `tickets:${evt.platform}:${evt.platformId}`,
             ),
-            Markup.button.url('🔗 Buy', evt.url),
-          ]);
+          ];
+          // Only add URL button if we have a valid URL
+          if (evt.url && evt.url.startsWith('http')) {
+            buttonRow.push(Markup.button.url('🔗 Buy', evt.url));
+          }
+          eventButtons.push(buttonRow);
         }
 
         if (result.events > result.upcomingEvents.length) {

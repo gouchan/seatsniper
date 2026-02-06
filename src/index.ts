@@ -28,6 +28,7 @@ import { testConnection, closePool } from './data/database.js';
 import * as SubRepo from './data/repositories/subscription.repository.js';
 import * as AlertRepo from './data/repositories/alert.repository.js';
 import * as PriceHistoryRepo from './data/repositories/price-history.repository.js';
+import * as EventGroupRepo from './data/repositories/event-group.repository.js';
 
 // ============================================================================
 // Application Class
@@ -74,6 +75,7 @@ export class SeatSniperApp {
         await SubRepo.ensureTable();
         await AlertRepo.ensureTable();
         await PriceHistoryRepo.ensureTable();
+        await EventGroupRepo.ensureTable();
         this.dbAvailable = true;
         logger.info('  ✓ PostgreSQL connected');
       } else {

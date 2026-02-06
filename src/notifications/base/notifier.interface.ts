@@ -49,6 +49,17 @@ export interface AlertPayload {
 
   /** Seat map URL from platform API (Ticketmaster/SeatGeek) */
   seatMapUrl?: string;
+
+  /** Cross-platform price comparison (if available) */
+  crossPlatformComparison?: {
+    platformsCompared: string[];
+    sections: Array<{
+      section: string;
+      prices: Array<{ platform: string; price: number; url: string }>;
+      bestDeal: { platform: string; price: number; savings: number } | null;
+    }>;
+    overallBestDeal: { section: string; platform: string; price: number; url: string } | null;
+  };
 }
 
 export enum AlertType {

@@ -5,9 +5,9 @@
 
 ---
 
-## CURRENT STATE (as of 2026-02-05, session 8)
+## CURRENT STATE (as of 2026-02-05, session 9)
 
-**Completion: ~82%** (up from 72%)
+**Completion: ~90%** (up from 82%)
 
 ### What runs right now
 - `npm run build` compiles clean (tsup bundles 200KB ESM)
@@ -88,6 +88,38 @@
 ---
 
 ## WHAT WAS DONE EACH SESSION
+
+### Session: 2026-02-05 (Session 9) — Cross-Platform Price Comparison
+
+**Completion: 82% → 90%**
+
+#### Features Implemented
+1. **Event Matching Service** — Fuzzy matching across Ticketmaster, SeatGeek, and StubHub using Levenshtein distance (>85% similarity), venue aliases, and date/time proximity (±30 min)
+2. **Venue Aliases** — 30+ Pacific Northwest venue mappings (Moda Center, Climate Pledge Arena, Lumen Field, Providence Park, Gorge Amphitheatre, etc.)
+3. **Price Comparator** — Normalizes section names across platforms and calculates best deals per section with savings percentages
+4. **Event Groups Tables** — `event_groups` and `event_group_members` database tables persist cross-platform matches
+5. **Alert Enhancement** — Alerts now include `crossPlatformComparison` data when the same event exists on multiple platforms
+6. **Telegram Formatter Update** — New `formatAlertWithComparison()` method displays best deals by section
+
+#### Files Created
+- `src/services/matching/event-matching.service.ts` — Levenshtein distance, event matching logic
+- `src/services/matching/venue-aliases.ts` — PNW venue alias mappings
+- `src/services/matching/index.ts` — Module re-exports
+- `src/data/repositories/event-group.repository.ts` — Event group CRUD
+- `src/services/value-engine/price-comparator.ts` — Cross-platform price comparison
+
+#### Files Modified
+- `src/services/monitoring/monitor.service.ts` — Event matching integration, cross-platform comparison in alerts
+- `src/notifications/telegram/telegram.formatter.ts` — Comparison formatting methods
+- `src/notifications/base/notifier.interface.ts` — AlertPayload.crossPlatformComparison field
+- `src/index.ts` — EventGroupRepo table initialization
+
+#### Metrics
+- Bundle size: 219KB ESM (up from 200KB)
+- Tests: 274 passing (unchanged)
+- Build: Clean
+
+---
 
 ### Session: 2026-02-05 (Session 8) — Critical Bug Fixes + Historical Pricing
 
@@ -485,7 +517,7 @@ User ←→ Telegram Bot (9 commands, inline actions)
 
 | Feature | Ticketmaster | SeatGeek | StubHub |
 |---------|-------------|----------|---------|
-| **Status** | ✅ LIVE | Code ready | Code ready |
+| **Status** | ✅ LIVE | Code ready | 95% ready |
 | **Event Search** | ✅ Yes | ✅ Yes | ✅ Yes |
 | **Listing Prices** | ✅ Yes | ✅ Yes | ✅ Yes |
 | **Seat Maps** | Static URL | Interactive + static | ❌ None |
@@ -494,7 +526,7 @@ User ←→ Telegram Bot (9 commands, inline actions)
 | **Deal Quality Score** | ❌ | ✅ SeatGeek DQ | ❌ |
 | **Setup Effort** | ✅ Done! | Medium | High |
 
-**MVP Strategy:** Ticketmaster alone covers events + listings + pricing. SeatGeek = Phase 2 for better seat maps.
+**MVP Strategy:** Ticketmaster alone covers events + listings + pricing. SeatGeek/StubHub = Phase 2 for cross-platform comparison (code ready, needs credentials).
 
 ---
 

@@ -4,6 +4,7 @@
  */
 
 import type { AlertPayload, TopValueListing } from '../base/notifier.interface.js';
+import type { EventComparison } from '../../services/value-engine/price-comparator.js';
 
 // ============================================================================
 // Telegram Formatter
@@ -141,5 +142,100 @@ export class TelegramFormatter {
       `📍 ${payload.venueName}\n` +
       `💰 $${topListing.pricePerTicket} | Score: ${topListing.valueScore}\n`
     ) + `[Buy](${topListing.deepLink})`;
+  }
+
+  /**
+   * Format cross-platform price comparison section
+   */
+  formatComparison(comparison: EventComparison): string {
+    const lines: string[] = [];
+
+    // Header
+    lines.push('');
+    lines.push('💰 CROSS-PLATFORM COMPARISON');
+    lines.push('━━━━━━━━━━━━━━━━━━━━━');
+    lines.push(`Platforms: ${comparison.platformsCompared.map(p => this.getPlatformLabel(p)).join(' vs ')}`);
+
+    // Top 3 sections with best deals
+    const topDeals = comparison.sections
+      .filter(s => s.bestDeal && s.prices.length > 1)
+      .slice(0, 3);
+
+    if (topDeals.length > 0) {
+      lines.push('');
+      lines.push('Best Deals by Section:');
+      for (const section of topDeals) {
+        const deal = section.bestDeal!;
+        const priceList = section.prices
+          .map(p => `${this.getPlatformAbbrev(p.platform)} $${p.price}`)
+          .join(' < ');
+        lines.push(`  • ${section.section}: ${priceList}`);
+        if (deal.savings > 0) {
+          lines.push(`    ✓ Save $${deal.savings} (${deal.savingsPercent}%) on ${this.getPlatformAbbrev(deal.platform)}`);
+        }
+      }
+    }
+
+    // Overall best deal
+    if (comparison.overallBestDeal) {
+      const best = comparison.overallBestDeal;
+      lines.push('');
+      lines.push(`🏆 BEST DEAL: ${best.section} on ${this.getPlatformAbbrev(best.platform)} @ $${best.price}`);
+    }
+
+    return this.escapeMarkdown(lines.join('\n'));
+  }
+
+  /**
+   * Format alert with cross-platform comparison
+   */
+  formatAlertWithComparison(payload: AlertPayload, comparison: EventComparison | null): string {
+    const baseAlert = this.formatAlert(payload);
+
+    if (!comparison || comparison.platformsCompared.length < 2) {
+      return baseAlert;
+    }
+
+    const comparisonSection = this.formatComparison(comparison);
+
+    // Insert comparison before footer
+    const footerStart = baseAlert.lastIndexOf('━━━━━━━━━━━━━━━━━━━━━');
+    if (footerStart > 0) {
+      return baseAlert.slice(0, footerStart) + comparisonSection + '\n\n' + baseAlert.slice(footerStart);
+    }
+
+    return baseAlert + '\n' + comparisonSection;
+  }
+
+  /**
+   * Get platform label with emoji
+   */
+  private getPlatformLabel(platform: string): string {
+    switch (platform.toLowerCase()) {
+      case 'ticketmaster':
+        return '🎫 Ticketmaster';
+      case 'seatgeek':
+        return '🪑 SeatGeek';
+      case 'stubhub':
+        return '🎟️ StubHub';
+      default:
+        return platform;
+    }
+  }
+
+  /**
+   * Get platform abbreviation
+   */
+  private getPlatformAbbrev(platform: string): string {
+    switch (platform.toLowerCase()) {
+      case 'ticketmaster':
+        return 'TM';
+      case 'seatgeek':
+        return 'SG';
+      case 'stubhub':
+        return 'SH';
+      default:
+        return platform.slice(0, 2).toUpperCase();
+    }
   }
 }

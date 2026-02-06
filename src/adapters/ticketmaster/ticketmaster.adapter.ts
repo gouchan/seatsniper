@@ -185,8 +185,12 @@ export class TicketmasterAdapter implements IPlatformAdapter {
           );
         } catch (innerError) {
           // Top Picks returns 404 for events without listings
-          if (axios.isAxiosError(innerError) && innerError.response?.status === 404) {
-            return { data: { picks: [] } } as any;
+          // Top Picks returns 401 if API key doesn't have access (common issue)
+          if (axios.isAxiosError(innerError)) {
+            const status = innerError.response?.status;
+            if (status === 404 || status === 401 || status === 403) {
+              return { data: { picks: [] } } as any;
+            }
           }
           throw innerError;
         }

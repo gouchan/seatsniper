@@ -8,6 +8,7 @@ Ticket intelligence platform that monitors Ticketmaster and SeatGeek for event t
 - **🔎 Keyword Search** — Find specific events (artists, teams, shows) across all platforms
 - **📋 Smart Alerts** — Get notified when deals match your preferences (city, seats, budget, quality)
 - **🎫 Multi-Platform** — Ticketmaster live, SeatGeek ready (shows platform indicator per event)
+- **🔄 Cross-Platform Comparison** — See best prices across all platforms for the same event
 - **💰 Real Pricing** — See actual ticket price ranges, not just "tickets available"
 - **🤖 Telegram Bot** — Persistent button keyboard, no commands to memorize
 
@@ -81,6 +82,32 @@ Each alert includes:
 - 🔕 **Mute Event** — stop alerts for that specific event
 - 🔄 **Refresh** — re-scan the city for updated prices
 
+## Cross-Platform Comparison
+
+When the same event exists on multiple platforms, alerts include a price comparison:
+
+```
+🏀 Trail Blazers vs Lakers
+📍 Moda Center | Mar 15, 7:00 PM
+
+💰 CROSS-PLATFORM COMPARISON
+━━━━━━━━━━━━━━━━━━━━━
+Platforms: 🎫 Ticketmaster vs 🪑 SeatGeek
+
+Best Deals by Section:
+  • Section 100: TM $85 < SG $92
+    ✓ Save $7 (8%) on TM
+  • Section 200: SG $45 < TM $52
+    ✓ Save $7 (13%) on SG
+
+🏆 BEST DEAL: Section 200 on SG @ $45
+```
+
+Events are matched using:
+- **Fuzzy name matching** — Levenshtein distance >85% similarity
+- **Venue aliases** — 30+ PNW venue mappings (Moda Center, Climate Pledge Arena, etc.)
+- **Date/time proximity** — Within 30 minutes
+
 ## Value Score
 
 Each listing gets a 1-100 score based on five weighted components:
@@ -122,12 +149,13 @@ Additional features:
 
 ## Project Status
 
-**Completion: ~82%** — Functional MVP with known gaps.
+**Completion: ~90%** — Core sniping features complete.
 
 | Category | Status |
 |----------|--------|
-| Telegram Bot UX | ✅ 85% — All flows work |
-| Value Engine | ✅ 85% — Historical pricing now wired |
+| Telegram Bot UX | ✅ 90% — All flows work |
+| Value Engine | ✅ 90% — Historical pricing + cross-platform |
+| Cross-Platform | ✅ 95% — TM/SG/SH matching + best deal alerts |
 | Subscription Flow | ✅ 90% — Category/keyword filtering implemented |
 | Error Handling | ⚠️ 70% — Circuit breaker not user-visible |
 | Test Coverage | ⚠️ 65% — Gaps in critical paths |

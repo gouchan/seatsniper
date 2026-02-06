@@ -4,6 +4,20 @@ All notable changes to SeatSniper are documented here.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-02-05
+
+### Added
+- **🔄 Cross-Platform Price Comparison** — New event matching service identifies identical events across Ticketmaster, SeatGeek, and StubHub using fuzzy name matching (Levenshtein distance >85%), venue aliases, and date/time proximity (±30 min)
+- **🏆 Best Deal Alerts** — When multiple platforms have the same event, alerts now show price comparison by section with savings highlighted (e.g., "TM $45 < SG $52 — Save $7 on TM")
+- **🏟️ Venue Aliases** — 30+ Pacific Northwest venue mappings (Moda Center, Climate Pledge Arena, Lumen Field, Providence Park, etc.) to ensure cross-platform matching works despite different naming conventions
+- **📊 Event Groups Table** — New `event_groups` and `event_group_members` database tables persist cross-platform matches for faster lookups
+- **🎯 Price Comparator Service** — Normalizes section names across platforms and calculates best deals per section
+
+### Changed
+- Bundle size: 219KB ESM (up from 200KB due to matching service)
+- MonitorService now runs event matching during discovery cycle
+- Alerts include `crossPlatformComparison` when available
+
 ## [0.4.0] - 2026-02-05
 
 ### Added
@@ -77,7 +91,9 @@ All notable changes to SeatSniper are documented here.
 
 ---
 
-[Unreleased]: https://github.com/gouchan/seatsniper/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/gouchan/seatsniper/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/gouchan/seatsniper/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/gouchan/seatsniper/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/gouchan/seatsniper/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/gouchan/seatsniper/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/gouchan/seatsniper/compare/v0.0.1...v0.1.0
