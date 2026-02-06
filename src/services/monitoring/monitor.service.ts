@@ -1070,6 +1070,15 @@ export class MonitorService {
   }
 
   /**
+   * Get a tracked event by platform and event ID
+   */
+  getEventById(platform: string, eventId: string): NormalizedEvent | undefined {
+    const key = `${platform}:${eventId}`;
+    const tracked = this.trackedEvents.get(key);
+    return tracked?.event;
+  }
+
+  /**
    * Search for events by keyword in a specific city
    */
   async searchEvents(keyword: string, city: string): Promise<{

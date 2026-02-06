@@ -39,6 +39,11 @@ export class TelegramNotifier implements INotifier {
   // Initialization
   // ==========================================================================
 
+  /** Maximum retry attempts for initialization */
+  private static readonly MAX_INIT_RETRIES = 3;
+  /** Delay between retries (15 seconds to handle post-logOut cooldown) */
+  private static readonly INIT_RETRY_DELAY_MS = 15000;
+
   async initialize(): Promise<void> {
     if (this.isInitialized) return;
 
@@ -46,18 +51,37 @@ export class TelegramNotifier implements INotifier {
       throw new Error('Telegram bot token not configured');
     }
 
-    try {
-      // Verify bot token by getting bot info
-      const botInfo = await this.bot.telegram.getMe();
-      logger.info(`[Telegram] Bot initialized: @${botInfo.username}`, {
-        botId: botInfo.id,
-        username: botInfo.username,
-      });
+    let lastError: Error | null = null;
 
-      this.isInitialized = true;
-    } catch (error) {
-      throw new Error(`Failed to initialize Telegram bot: ${error}`);
+    for (let attempt = 1; attempt <= TelegramNotifier.MAX_INIT_RETRIES; attempt++) {
+      try {
+        // Verify bot token by getting bot info
+        const botInfo = await this.bot.telegram.getMe();
+        logger.info(`[Telegram] Bot initialized: @${botInfo.username}`, {
+          botId: botInfo.id,
+          username: botInfo.username,
+        });
+
+        this.isInitialized = true;
+        return;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        const isLoggedOut = lastError.message.includes('Logged out');
+
+        if (isLoggedOut && attempt < TelegramNotifier.MAX_INIT_RETRIES) {
+          // This happens after a logOut call - need to wait for Telegram's cooldown
+          logger.warn(`[Telegram] API returned "Logged out", waiting ${TelegramNotifier.INIT_RETRY_DELAY_MS / 1000}s before retry (attempt ${attempt}/${TelegramNotifier.MAX_INIT_RETRIES})`);
+          await new Promise(r => setTimeout(r, TelegramNotifier.INIT_RETRY_DELAY_MS));
+        } else if (attempt < TelegramNotifier.MAX_INIT_RETRIES) {
+          logger.warn(`[Telegram] Init failed, retrying (attempt ${attempt}/${TelegramNotifier.MAX_INIT_RETRIES})`, {
+            error: lastError.message,
+          });
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      }
     }
+
+    throw new Error(`Failed to initialize Telegram bot after ${TelegramNotifier.MAX_INIT_RETRIES} attempts: ${lastError?.message}`);
   }
 
   // ==========================================================================

@@ -101,37 +101,178 @@ export class TelegramBotService {
   // Lifecycle
   // ==========================================================================
 
+  /** Maximum number of reconnection attempts before giving up */
+  private static readonly MAX_RECONNECT_ATTEMPTS = 5;
+  /** Base delay between reconnection attempts (doubles each time) */
+  private static readonly RECONNECT_BASE_DELAY_MS = 5000;
+  /** Current reconnection attempt count */
+  private reconnectAttempts = 0;
+  /** Flag to prevent multiple recovery attempts */
+  private isRecovering = false;
+
   async start(): Promise<void> {
     if (this.isRunning) return;
 
-    const botInfo = await this.bot.telegram.getMe();
-    logger.info(`[TelegramBot] Starting @${botInfo.username}`);
+    try {
+      // Pre-launch: just clear webhook, don't logOut (that's too aggressive for normal startup)
+      await this.clearWebhook();
 
-    // Launch long-polling with dropPendingUpdates to avoid stale messages.
-    // TelegramNotifier only uses bot.telegram.* API calls (no polling needed).
-    this.bot.launch({ dropPendingUpdates: true }).catch(err => {
-      logger.error('[TelegramBot] Long-polling crashed', {
-        error: err instanceof Error ? err.message : String(err),
+      const botInfo = await this.bot.telegram.getMe();
+      logger.info(`[TelegramBot] Starting @${botInfo.username}`);
+
+      // Launch long-polling
+      this.launchPolling();
+
+      this.isRunning = true;
+
+      // Prune stale sessions every 5 minutes
+      this.sessionPruneTimer = setInterval(() => this.pruneSessions(), 5 * 60 * 1000);
+
+      logger.info(`[TelegramBot] Bot is live — @${botInfo.username}`);
+    } catch (error) {
+      logger.error('[TelegramBot] Failed to start', {
+        error: error instanceof Error ? error.message : String(error),
       });
-    });
-    this.isRunning = true;
+      throw error;
+    }
+  }
 
-    // Prune stale sessions every 5 minutes
-    this.sessionPruneTimer = setInterval(() => this.pruneSessions(), 5 * 60 * 1000);
+  /**
+   * Clear webhook and drop pending updates (light cleanup)
+   */
+  private async clearWebhook(): Promise<void> {
+    try {
+      await this.bot.telegram.deleteWebhook({ drop_pending_updates: true });
+      logger.debug('[TelegramBot] Cleared webhook and pending updates');
+    } catch (error) {
+      // Non-fatal - might fail if already cleared
+      logger.debug('[TelegramBot] Webhook clear skipped', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 
-    logger.info(`[TelegramBot] Bot is live — @${botInfo.username}`);
+  /**
+   * Force clean session for 409 recovery
+   * Note: We do NOT use logOut anymore because it causes a 10+ second cooldown
+   * that affects all API calls, making the situation worse.
+   */
+  private async forceCleanSession(): Promise<void> {
+    // Just clear webhook - don't call logOut as it causes more problems than it solves
+    await this.clearWebhook();
+  }
+
+  /**
+   * Launch polling with automatic recovery on 409 conflicts
+   */
+  private launchPolling(): void {
+    this.bot.launch({ dropPendingUpdates: true })
+      .catch(async (err: Error) => {
+        await this.handlePollingError(err);
+      });
+  }
+
+  /**
+   * Handle polling errors with automatic recovery
+   */
+  private async handlePollingError(err: Error): Promise<void> {
+    const is409 = err.message.includes('409') || err.message.includes('Conflict');
+
+    if (!is409) {
+      logger.error('[TelegramBot] Polling error (non-409)', {
+        error: err.message,
+      });
+      return;
+    }
+
+    // Prevent multiple simultaneous recovery attempts
+    if (this.isRecovering) {
+      logger.debug('[TelegramBot] Recovery already in progress, skipping');
+      return;
+    }
+
+    this.isRecovering = true;
+
+    try {
+      if (this.reconnectAttempts >= TelegramBotService.MAX_RECONNECT_ATTEMPTS) {
+        logger.error('[TelegramBot] Max reconnect attempts reached, giving up', {
+          attempts: this.reconnectAttempts,
+        });
+        this.isRecovering = false;
+        return;
+      }
+
+      this.reconnectAttempts++;
+      const delay = TelegramBotService.RECONNECT_BASE_DELAY_MS * Math.pow(2, this.reconnectAttempts - 1);
+
+      logger.warn(`[TelegramBot] 409 Conflict - attempt ${this.reconnectAttempts}/${TelegramBotService.MAX_RECONNECT_ATTEMPTS}, waiting ${delay / 1000}s...`);
+
+      // Stop the current bot instance
+      try {
+        this.bot.stop('SIGTERM');
+      } catch {
+        // Ignore
+      }
+
+      // Wait before retrying
+      await new Promise(r => setTimeout(r, delay));
+
+      // Try to force clean and restart
+      await this.forceCleanSession();
+      this.launchPolling();
+
+      logger.info('[TelegramBot] Recovery attempt initiated');
+    } finally {
+      this.isRecovering = false;
+    }
   }
 
   async stop(): Promise<void> {
     if (!this.isRunning) return;
+
+    this.isRunning = false;
+
     if (this.sessionPruneTimer) {
       clearInterval(this.sessionPruneTimer);
       this.sessionPruneTimer = null;
     }
     this.sessions.clear();
-    this.bot.stop('SIGTERM');
-    this.isRunning = false;
+
+    try {
+      this.bot.stop('SIGTERM');
+    } catch (error) {
+      logger.warn('[TelegramBot] Error during stop (non-fatal)', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
     logger.info('[TelegramBot] Stopped');
+  }
+
+  /**
+   * Check if the bot is healthy and can communicate with Telegram
+   */
+  async healthCheck(): Promise<{ healthy: boolean; error?: string }> {
+    if (!this.isRunning) {
+      return { healthy: false, error: 'Bot is not running' };
+    }
+
+    try {
+      const me = await this.bot.telegram.getMe();
+      return { healthy: true };
+    } catch (error) {
+      return {
+        healthy: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /**
+   * Get the running status
+   */
+  get running(): boolean {
+    return this.isRunning;
   }
 
   private pruneSessions(): void {
@@ -179,29 +320,60 @@ export class TelegramBotService {
   // ==========================================================================
 
   private registerHandlers(): void {
+    // Helper to wrap handlers with error catching
+    const safeHandler = <T extends TelegrafContext>(
+      handler: (ctx: T) => Promise<void>,
+      name: string,
+    ) => {
+      return async (ctx: T) => {
+        try {
+          await handler(ctx);
+        } catch (error) {
+          logger.error(`[TelegramBot] Error in ${name}`, {
+            error: error instanceof Error ? error.message : String(error),
+            chatId: ctx.chat?.id,
+          });
+          // Try to notify the user something went wrong
+          try {
+            await ctx.reply('❌ Something went wrong. Please try again.');
+          } catch {
+            // If we can't even reply, just log it
+          }
+        }
+      };
+    };
+
     // ---- Commands ----
-    this.bot.start(ctx => this.handleStart(ctx));
-    this.bot.command('subscribe', ctx => this.handleSubscribe(ctx));
-    this.bot.command('unsub', ctx => this.handleUnsub(ctx));
-    this.bot.command('scan', ctx => this.handleScan(ctx));
-    this.bot.command('status', ctx => this.handleStatus(ctx));
-    this.bot.command('settings', ctx => this.handleSettings(ctx));
-    this.bot.command('pause', ctx => this.handlePause(ctx));
-    this.bot.command('resume', ctx => this.handleResume(ctx));
-    this.bot.help(ctx => this.handleHelp(ctx));
+    this.bot.start(safeHandler(ctx => this.handleStart(ctx), 'start'));
+    this.bot.command('subscribe', safeHandler(ctx => this.handleSubscribe(ctx), 'subscribe'));
+    this.bot.command('unsub', safeHandler(ctx => this.handleUnsub(ctx), 'unsub'));
+    this.bot.command('scan', safeHandler(ctx => this.handleScan(ctx), 'scan'));
+    this.bot.command('status', safeHandler(ctx => this.handleStatus(ctx), 'status'));
+    this.bot.command('settings', safeHandler(ctx => this.handleSettings(ctx), 'settings'));
+    this.bot.command('pause', safeHandler(ctx => this.handlePause(ctx), 'pause'));
+    this.bot.command('resume', safeHandler(ctx => this.handleResume(ctx), 'resume'));
+    this.bot.help(safeHandler(ctx => this.handleHelp(ctx), 'help'));
 
     // ---- Callback queries (inline keyboard buttons) ----
-    this.bot.on('callback_query', ctx => this.handleCallback(ctx));
+    this.bot.on('callback_query', safeHandler(ctx => this.handleCallback(ctx), 'callback'));
 
     // ---- Text messages (for conversational flows) ----
-    this.bot.on('text', ctx => this.handleText(ctx));
+    this.bot.on('text', safeHandler(ctx => this.handleText(ctx), 'text'));
 
-    // ---- Error handler ----
+    // ---- Global error handler (last resort) ----
     this.bot.catch((err, ctx) => {
-      logger.error('[TelegramBot] Unhandled error', {
-        error: err instanceof Error ? err.message : String(err),
-        chatId: ctx.chat?.id,
-      });
+      const is409 = err instanceof Error && (err.message.includes('409') || err.message.includes('Conflict'));
+
+      if (is409) {
+        // Route 409s to recovery logic
+        logger.warn('[TelegramBot] 409 Conflict caught by global handler, triggering recovery');
+        this.handlePollingError(err as Error);
+      } else {
+        logger.error('[TelegramBot] Unhandled error', {
+          error: err instanceof Error ? err.message : String(err),
+          chatId: ctx?.chat?.id,
+        });
+      }
     });
   }
 
@@ -1118,69 +1290,63 @@ export class TelegramBotService {
     platform: string,
     eventId: string,
   ): Promise<void> {
-    await ctx.sendChatAction('typing');
-
     try {
-      const listings = await this.monitor.getListingsForEvent(platform, eventId);
+      // Look up the event from our tracked events
+      const event = this.monitor.getEventById(platform, eventId);
 
-      if (listings.length === 0) {
-        await ctx.answerCbQuery('No tickets available right now');
+      if (!event) {
+        await ctx.answerCbQuery('Event not found');
         await this.sendWithMainMenu(
           ctx,
-          `🎟️ No tickets currently listed for this event\\.\n\n_Check back later or tap the 🔗 Buy link to see the official page\\._`,
-          { parse_mode: 'MarkdownV2' },
+          '❌ Event not found. Try scanning again.',
         );
         return;
       }
 
-      // Sort by price (cheapest first)
-      const sortedListings = [...listings].sort(
-        (a, b) => a.pricePerTicket - b.pricePerTicket,
-      );
+      // Build event details message
+      const dateStr = event.dateTime.toLocaleDateString('en-US', {
+        weekday: 'long',
+        month: 'long',
+        day: 'numeric',
+        year: 'numeric',
+      });
+      const timeStr = event.dateTime.toLocaleTimeString('en-US', {
+        hour: 'numeric',
+        minute: '2-digit',
+      });
 
-      // Take top 10 listings
-      const topListings = sortedListings.slice(0, 10);
+      const priceLine = event.priceRange
+        ? `💰 *Price Range:* $${event.priceRange.min} – $${event.priceRange.max}`
+        : '💰 *Price:* See link for current prices';
 
-      let response = `🎟️ *Available Tickets* \\(${listings.length} total\\)\n`;
+      const platformName = platform === 'ticketmaster' ? 'Ticketmaster' : platform;
+
+      let response = `🎟️ *${this.escapeMarkdown(event.name)}*\n`;
       response += `━━━━━━━━━━━━━━━━━━━━━\n\n`;
+      response += `📍 *Venue:* ${this.escapeMarkdown(event.venue.name)}\n`;
+      response += `📅 *Date:* ${this.escapeMarkdown(dateStr)}\n`;
+      response += `🕐 *Time:* ${this.escapeMarkdown(timeStr)}\n`;
+      response += `${priceLine}\n\n`;
+      response += `👆 Tap the button below to view available seats and buy tickets on ${this.escapeMarkdown(platformName)}\\!`;
 
-      for (const listing of topListings) {
-        const section = this.escapeMarkdown(listing.section || 'General');
-        const row = listing.row ? `, Row ${this.escapeMarkdown(listing.row)}` : '';
-        const seats = listing.seatNumbers?.length
-          ? ` \\(Seats ${this.escapeMarkdown(listing.seatNumbers.join(', '))}\\)`
-          : '';
-        const qty = listing.quantity > 1 ? ` — ${listing.quantity} tickets` : '';
-        const fees = listing.fees > 0 ? ` \\+$${listing.fees.toFixed(0)} fees` : '';
+      // Create inline button to open Ticketmaster
+      const buyButton = event.url && event.url.startsWith('http')
+        ? [[Markup.button.url(`🎫 Buy on ${platformName}`, event.url)]]
+        : [];
 
-        response += `📍 *${section}*${row}${seats}${qty}\n`;
-        response += `   💰 $${listing.pricePerTicket.toFixed(0)}/ea${fees}\n`;
-
-        if (listing.deepLink) {
-          response += `   [Buy Now](${listing.deepLink})\n`;
-        }
-        response += `\n`;
-      }
-
-      if (listings.length > 10) {
-        response += `_\\.\\.\\. and ${listings.length - 10} more listings_\n\n`;
-      }
-
-      // Show price summary
-      const minPrice = Math.min(...listings.map(l => l.pricePerTicket));
-      const maxPrice = Math.max(...listings.map(l => l.pricePerTicket));
-      response += `💵 Price range: $${minPrice.toFixed(0)} – $${maxPrice.toFixed(0)}`;
-
-      await ctx.answerCbQuery(`Found ${listings.length} tickets`);
-      await this.sendWithMainMenu(ctx, response, { parse_mode: 'MarkdownV2' });
+      await ctx.answerCbQuery('Opening event details...');
+      await ctx.reply(response, {
+        parse_mode: 'MarkdownV2',
+        ...Markup.inlineKeyboard(buyButton),
+      });
     } catch (error) {
       logger.error('[TelegramBot] View tickets failed', {
         platform,
         eventId,
         error: error instanceof Error ? error.message : String(error),
       });
-      await ctx.answerCbQuery('Failed to load tickets');
-      await this.sendWithMainMenu(ctx, '❌ Failed to load tickets. Try again later.');
+      await ctx.answerCbQuery('Failed to load event');
+      await this.sendWithMainMenu(ctx, '❌ Failed to load event. Try again later.');
     }
   }
 
