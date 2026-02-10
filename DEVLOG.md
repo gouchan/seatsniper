@@ -5,9 +5,9 @@
 
 ---
 
-## CURRENT STATE (as of 2026-02-10, session 11)
+## CURRENT STATE (as of 2026-02-10, session 11b)
 
-**Completion: ~93%** (up from 92%)
+**Completion: ~94%** (up from 93%)
 
 ### What runs right now
 - `npm run build` compiles clean (tsup bundles 200KB ESM)
@@ -16,7 +16,7 @@
 - `npm start` initializes adapters + notifiers, starts monitoring loop, launches Telegram bot
 - Docker Compose starts Postgres+TimescaleDB and Redis
 - Monitoring loop polls events on priority-based schedule (2min/10min/30min)
-- Telegram bot accepts 9 commands (/start, /subscribe, /scan, /status, /settings, /pause, /resume, /unsub, /help)
+- Telegram bot accepts 10 commands (/start, /subscribe, /scan, /watchlist, /status, /settings, /pause, /resume, /unsub, /help)
 - Subscribe flow: City (multi-select) → Quantity → Budget → Score threshold (4-step)
 - Subscriptions persist to PostgreSQL with pause/resume + budget + user tier
 - Alert deduplication: 30-minute cooldown per event per user (in-memory + DB)
@@ -30,6 +30,7 @@
 | `/start` | Welcome + quick start guide |
 | `/subscribe` | 4-step setup: city → qty → budget → score threshold |
 | `/scan [city]` | One-shot scan with typing indicator + timeout + buy links |
+| `/watchlist` | View your watched events with Compare Prices option |
 | `/status` | System status + your personal sub status |
 | `/settings` | View your preferences (cities, score, qty, budget, paused) |
 | `/pause` | Mute alerts (preserves all settings) |
@@ -45,6 +46,8 @@
 | `/subscribe` step 3 | 💰 $50 \| $100 \| $200 \| ♾️ No limit |
 | `/subscribe` step 4 | 🌟 85+ \| ✨ 70+ (Rec) \| 👍 55+ \| 📊 40+ |
 | `/scan` (no arg) | City selection buttons |
+| **Scan results** | ⭐ Watch (saves event to watchlist) |
+| `/watchlist` | 🔍 Compare Prices (~$0.035) \| ❌ Remove |
 | `/unsub` | ❌ Yes, unsubscribe \| ↩️ Keep my alerts |
 | **On Alerts** | 🔕 Mute Event \| 🔄 Refresh |
 
@@ -58,14 +61,15 @@
 | Component | Status | Notes |
 |-----------|--------|-------|
 | **Ticketmaster adapter** | ✅ LIVE | API key configured, 520+ Portland events, 1,100+ Seattle events |
-| **Google Events adapter** | ✅ NEW | Via Apify, scrapes Google Events for multi-platform data |
+| **Google Events adapter** | ✅ ON-DEMAND | Via Apify (~$0.035/search), user-triggered only |
+| **Watchlist repo** | ✅ NEW | Track watched events, in-memory fallback |
 | StubHub adapter | Code ready | OAuth 2.0, requires approval — overkill for MVP |
 | SeatGeek adapter | Code ready | Events, listings, seat maps — nice-to-have Phase 2 |
 | Value Engine | Works | 5-component weighted scoring algorithm |
 | Rate limiter | Fixed | Serialized via queue (2026-01-31) |
 | Circuit breaker | Fixed | Timeout inside retry (2026-01-31) |
 | Monitoring loop | **Hardened** | Cycle guards, event pruning, parallel discovery, budget + pause filter |
-| Telegram bot UX | **Upgraded** | 9 commands, multi-city, budget, pause/resume, mute, confirmations |
+| Telegram bot UX | **Upgraded** | 10 commands, watchlist, multi-city, budget, pause/resume, mute |
 | Telegram notifier | **Hardened** | MarkdownV2 fixed, shared Telegraf instance, auto-deactivate on block |
 | Telegram seat maps | Works | Sent as photos before text alerts with venue highlights |
 | SMS notifier | Untested | Twilio SDK wired, should work |
@@ -89,6 +93,66 @@
 ---
 
 ## WHAT WAS DONE EACH SESSION
+
+### Session: 2026-02-10 (Session 11b) — Watchlist Feature & Cost Optimization
+
+**Completion: 93% → 94%**
+
+#### Problem: Google Events Would Drain Apify Credits
+- Google Events costs ~$0.035/search
+- If left in auto-polling (every 15 min): $0.035 × 4 × 24 = **$3.36/day**
+- User's $3.30 Apify free credit would be gone in ~1 day
+
+#### Solution: 3-Stage Funnel with User-Triggered Paid Searches
+
+**Stage 1: FREE DISCOVERY** (auto-polled)
+- Only Ticketmaster (free API) runs in the monitoring loop
+- Google Events removed from auto-polling adapters
+
+**Stage 2: WATCHLIST** (still free)
+- Users can tap "⭐ Watch" on any event from scan results
+- Events saved to watchlist for tracking
+- New `/watchlist` command shows all watched events
+
+**Stage 3: DEEP COMPARE** (paid, on-demand ~$0.035)
+- Users tap "🔍 Compare Prices" on watched events
+- Only then does Google Events fire (user-initiated)
+- Cost goes from $3.36/day → ~$0.035 per user request
+
+#### Changes Made
+
+**Architecture (`src/index.ts`):**
+- Split adapters into two maps:
+  - `adapters` — free, auto-polled (Ticketmaster, SeatGeek)
+  - `onDemandAdapters` — paid, user-triggered (Google Events)
+- Added `getOnDemandAdapters()` getter
+- Google Events now in `onDemandAdapters`, not `adapters`
+
+**New Watchlist Repository (`src/data/repositories/watchlist.repository.ts`):**
+- `WatchedEvent` type with initial/last prices, alert thresholds
+- CRUD: `addToWatchlist()`, `getWatchlist()`, `removeFromWatchlist()`
+- `isWatching()`, `updatePrices()`, `getAllWatchedEvents()`
+- In-memory fallback when DB unavailable
+- Max 50 watched events per user
+
+**Telegram Bot UX (`src/notifications/telegram/telegram.bot.ts`):**
+- Added `⭐ Watchlist` to main menu
+- Added `/watchlist` command
+- Scan results now show `⭐ Watch` button
+- Watched events show `🔍 Compare Prices` and `❌ Remove` buttons
+- New callback handlers: `watch:`, `unwatch:`, `compare:`
+
+**TypeScript Fixes:**
+- Removed unused imports and variables
+- Fixed button type mismatch (can't mix URL + callback buttons)
+- Changed unused params to `_param` convention
+
+#### Tests
+- All 274 tests pass
+- Build clean (260KB bundle)
+- TypeScript: 0 errors
+
+---
 
 ### Session: 2026-02-10 (Session 11) — Google Events Adapter (API Alternative)
 

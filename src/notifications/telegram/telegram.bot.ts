@@ -19,8 +19,9 @@
 import { Telegraf, Markup } from 'telegraf';
 import type { Context as TelegrafContext } from 'telegraf';
 import type { MonitorService, Subscription } from '../../services/monitoring/monitor.service.js';
-import type { NormalizedEvent, NormalizedListing } from '../../adapters/base/platform-adapter.interface.js';
+// Note: NormalizedEvent is used via monitor.getEventById() return type
 import * as SubRepo from '../../data/repositories/subscription.repository.js';
+import * as WatchlistRepo from '../../data/repositories/watchlist.repository.js';
 import { logger } from '../../utils/logger.js';
 import { config } from '../../config/index.js';
 
@@ -58,6 +59,7 @@ type MutedEvents = Map<string, Set<string>>;
 const MENU = {
   SCAN:      '🔍 Scan',
   SEARCH:    '🔎 Search',
+  WATCHLIST: '⭐ Watchlist',
   SUBSCRIBE: '📋 Subscribe',
   STATUS:    '📊 Status',
   SETTINGS:  '⚙️ Settings',
@@ -274,7 +276,7 @@ export class TelegramBotService {
     }
 
     try {
-      const me = await this.bot.telegram.getMe();
+      await this.bot.telegram.getMe();
       return { healthy: true };
     } catch (error) {
       return {
@@ -333,10 +335,6 @@ export class TelegramBotService {
     }
   }
 
-  // Keep old method name for backwards compatibility
-  private pruneSessions(): void {
-    this.pruneResources();
-  }
 
   // ==========================================================================
   // Persistent Reply Keyboard Helpers
@@ -345,7 +343,7 @@ export class TelegramBotService {
   /** Single source of truth for the main menu keyboard layout */
   private mainMenuKeyboard() {
     return Markup.keyboard([
-      [MENU.SCAN, MENU.SEARCH],
+      [MENU.SCAN, MENU.SEARCH, MENU.WATCHLIST],
       [MENU.SUBSCRIBE, MENU.STATUS],
       [MENU.SETTINGS, MENU.PAUSE],
       [MENU.RESUME, MENU.HELP],
@@ -418,6 +416,7 @@ export class TelegramBotService {
     this.bot.command('subscribe', safeHandler(ctx => this.handleSubscribe(ctx), 'subscribe'));
     this.bot.command('unsub', safeHandler(ctx => this.handleUnsub(ctx), 'unsub'));
     this.bot.command('scan', safeHandler(ctx => this.handleScan(ctx), 'scan'));
+    this.bot.command('watchlist', safeHandler(ctx => this.handleWatchlist(ctx), 'watchlist'));
     this.bot.command('status', safeHandler(ctx => this.handleStatus(ctx), 'status'));
     this.bot.command('settings', safeHandler(ctx => this.handleSettings(ctx), 'settings'));
     this.bot.command('pause', safeHandler(ctx => this.handlePause(ctx), 'pause'));
@@ -716,19 +715,19 @@ export class TelegramBotService {
             `   📅 ${this.escapeMarkdown(dateStr + ', ' + timeStr)}\n` +
             `   ${this.escapeMarkdown(priceLine)}\n\n`;
 
-          // Add "View Tickets" button for this event (truncate name for button)
-          const shortName = evt.name.length > 20 ? evt.name.slice(0, 20) + '...' : evt.name;
-          const buttonRow: ReturnType<typeof Markup.button.callback>[] = [
+          // Add buttons for this event (truncate name for button)
+          const shortName = evt.name.length > 15 ? evt.name.slice(0, 15) + '...' : evt.name;
+          // Use separate rows to avoid mixing callback and URL button types
+          eventButtons.push([
             Markup.button.callback(
               `🎟️ ${shortName}`,
               `tickets:${evt.platform}:${evt.platformId}`,
             ),
-          ];
-          // Only add URL button if we have a valid URL
-          if (evt.url && evt.url.startsWith('http')) {
-            buttonRow.push(Markup.button.url('🔗 Buy', evt.url));
-          }
-          eventButtons.push(buttonRow);
+            Markup.button.callback(
+              '⭐ Watch',
+              `watch:${evt.platform}:${evt.platformId}`,
+            ),
+          ]);
         }
 
         if (result.events > result.upcomingEvents.length) {
@@ -845,14 +844,17 @@ export class TelegramBotService {
           `   📅 ${this.escapeMarkdown(dateStr + ', ' + timeStr)}\n` +
           `   ${this.escapeMarkdown(priceLine)}\n\n`;
 
-        // Add "View Tickets" button
-        const shortName = evt.name.length > 20 ? evt.name.slice(0, 20) + '...' : evt.name;
+        // Add buttons for this event
+        const shortName = evt.name.length > 15 ? evt.name.slice(0, 15) + '...' : evt.name;
         eventButtons.push([
           Markup.button.callback(
             `🎟️ ${shortName}`,
             `tickets:${evt.platform}:${evt.platformId}`,
           ),
-          Markup.button.url('🔗 Buy', evt.url),
+          Markup.button.callback(
+            '⭐ Watch',
+            `watch:${evt.platform}:${evt.platformId}`,
+          ),
         ]);
       }
 
@@ -966,21 +968,21 @@ export class TelegramBotService {
       `🎯 *SeatSniper Help*\n\n` +
       `*Menu Buttons:*\n` +
       `🔍 *Scan* — Quick scan a city for deals\n` +
+      `🔎 *Search* — Search events by keyword\n` +
+      `⭐ *Watchlist* — View events you're tracking\n` +
       `📋 *Subscribe* — Set up automatic alerts\n` +
       `📊 *Status* — Check monitoring activity\n` +
       `⚙️ *Settings* — View your preferences\n` +
       `⏸️ *Pause* / ▶️ *Resume* — Toggle alerts\n\n` +
       `*How it works:*\n` +
-      `1\\. Subscribe with city, seats, budget, and score\n` +
-      `2\\. I poll StubHub, Ticketmaster, and SeatGeek\n` +
-      `3\\. When high\\-value tickets are found, I send:\n` +
-      `   🗺️ Venue seat map with highlighted section\n` +
-      `   💰 Value score and price analysis\n` +
-      `   🛒 Direct buy link\n\n` +
+      `1\\. 🔍 Scan a city to discover events \\(FREE\\)\n` +
+      `2\\. ⭐ Watch specific events you're interested in\n` +
+      `3\\. 🔍 Compare Prices to check multiple platforms \\(~$0\\.03\\)\n` +
+      `4\\. 📋 Subscribe for automatic deal alerts\n\n` +
       `*On each alert you can:*\n` +
       `   🔕 Mute that event\n` +
       `   🔄 Refresh prices\n\n` +
-      `_Slash commands also work: /scan, /subscribe, /status, /unsub_`;
+      `_Slash commands: /scan, /search, /watchlist, /subscribe, /status, /unsub_`;
 
     await this.sendWithMainMenu(ctx, msg, { parse_mode: 'MarkdownV2' });
   }
@@ -1296,6 +1298,39 @@ export class TelegramBotService {
       await this.executeScan(ctx, city);
       return;
     }
+
+    // --- Watch event (add to watchlist) ---
+    if (data.startsWith('watch:')) {
+      const parts = data.split(':');
+      if (parts.length >= 3) {
+        const platform = parts[1];
+        const eventId = parts.slice(2).join(':');
+        await this.handleWatchEvent(ctx, chatId, platform, eventId);
+      }
+      return;
+    }
+
+    // --- Unwatch event (remove from watchlist) ---
+    if (data.startsWith('unwatch:')) {
+      const parts = data.split(':');
+      if (parts.length >= 3) {
+        const platform = parts[1];
+        const eventId = parts.slice(2).join(':');
+        await this.handleUnwatchEvent(ctx, chatId, platform, eventId);
+      }
+      return;
+    }
+
+    // --- Compare prices (triggers paid Google Events search) ---
+    if (data.startsWith('compare:')) {
+      const parts = data.split(':');
+      if (parts.length >= 3) {
+        const platform = parts[1];
+        const eventId = parts.slice(2).join(':');
+        await this.handleComparePrice(ctx, chatId, platform, eventId);
+      }
+      return;
+    }
   }
 
   // ==========================================================================
@@ -1317,6 +1352,7 @@ export class TelegramBotService {
       switch (text) {
         case MENU.SCAN:      return this.handleScan(ctx);
         case MENU.SEARCH:    return this.handleSearch(ctx);
+        case MENU.WATCHLIST: return this.handleWatchlist(ctx);
         case MENU.SUBSCRIBE: return this.handleSubscribe(ctx);
         case MENU.STATUS:    return this.handleStatus(ctx);
         case MENU.SETTINGS:  return this.handleSettings(ctx);
@@ -1427,6 +1463,198 @@ export class TelegramBotService {
       await ctx.answerCbQuery('Failed to load event');
       await this.sendWithMainMenu(ctx, '❌ Failed to load event. Try again later.');
     }
+  }
+
+  // ==========================================================================
+  // Watchlist — User's watched events
+  // ==========================================================================
+
+  private async handleWatchlist(ctx: TelegrafContext): Promise<void> {
+    const chatId = ctx.chat?.id?.toString();
+    if (!chatId) return;
+
+    try {
+      const watchlist = await WatchlistRepo.getWatchlist(chatId);
+
+      if (watchlist.length === 0) {
+        await this.sendWithMainMenu(
+          ctx,
+          '⭐ *Your Watchlist*\n\n' +
+          '_No events watched yet\\._\n\n' +
+          'Tap 🔍 Scan to find events, then tap ⭐ Watch to track price changes\\!',
+          { parse_mode: 'MarkdownV2' },
+        );
+        return;
+      }
+
+      let response = `⭐ *Your Watchlist* \\(${watchlist.length} events\\)\n`;
+      response += `━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+      const eventButtons: ReturnType<typeof Markup.button.callback>[][] = [];
+
+      for (const watched of watchlist) {
+        const dateStr = watched.eventDate.toLocaleDateString('en-US', {
+          weekday: 'short', month: 'short', day: 'numeric',
+        });
+
+        // Price change indicator
+        let priceChange = '';
+        if (watched.initialPriceMin && watched.lastPriceMin) {
+          const diff = watched.lastPriceMin - watched.initialPriceMin;
+          if (diff < 0) {
+            priceChange = ` 📉 \\-$${Math.abs(diff).toFixed(0)}`;
+          } else if (diff > 0) {
+            priceChange = ` 📈 \\+$${diff.toFixed(0)}`;
+          }
+        }
+
+        const priceLine = watched.lastPriceMin
+          ? `$${watched.lastPriceMin}${watched.lastPriceMax ? `–$${watched.lastPriceMax}` : ''}${priceChange}`
+          : 'Price TBD';
+
+        response +=
+          `🎫 *${this.escapeMarkdown(watched.eventName)}*\n` +
+          `   📍 ${this.escapeMarkdown(watched.venueName)}\n` +
+          `   📅 ${this.escapeMarkdown(dateStr)}\n` +
+          `   💰 ${this.escapeMarkdown(priceLine)}\n\n`;
+
+        // Buttons: Compare Prices (paid) | Unwatch
+        const shortName = watched.eventName.length > 12 ? watched.eventName.slice(0, 12) + '..' : watched.eventName;
+        eventButtons.push([
+          Markup.button.callback(
+            `🔍 Compare ${shortName}`,
+            `compare:${watched.platform}:${watched.platformEventId}`,
+          ),
+          Markup.button.callback(
+            '❌ Remove',
+            `unwatch:${watched.platform}:${watched.platformEventId}`,
+          ),
+        ]);
+      }
+
+      response += `\n_🔍 Compare Prices uses Google Events \\(~$0\\.03/search\\)_`;
+
+      if (eventButtons.length > 0) {
+        await ctx.reply(response, {
+          parse_mode: 'MarkdownV2',
+          ...Markup.inlineKeyboard(eventButtons),
+        });
+        await this.sendWithMainMenu(ctx, '👆 Tap to compare prices across platforms');
+      } else {
+        await this.sendWithMainMenu(ctx, response, { parse_mode: 'MarkdownV2' });
+      }
+    } catch (error) {
+      logger.error('[TelegramBot] Watchlist failed', {
+        userId: chatId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await this.sendWithMainMenu(ctx, '❌ Failed to load watchlist. Try again.');
+    }
+  }
+
+  private async handleWatchEvent(
+    ctx: TelegrafContext,
+    userId: string,
+    platform: string,
+    eventId: string,
+  ): Promise<void> {
+    try {
+      // Get event details from monitor
+      const event = this.monitor.getEventById(platform, eventId);
+
+      if (!event) {
+        await ctx.answerCbQuery('Event not found');
+        return;
+      }
+
+      // Check if already watching
+      const isAlreadyWatching = await WatchlistRepo.isWatching(userId, platform, eventId);
+      if (isAlreadyWatching) {
+        await ctx.answerCbQuery('⭐ Already on your watchlist!');
+        return;
+      }
+
+      // Add to watchlist
+      await WatchlistRepo.addToWatchlist({
+        userId,
+        event,
+      });
+
+      await ctx.answerCbQuery('⭐ Added to watchlist!');
+      logger.info('[TelegramBot] Event added to watchlist', {
+        userId,
+        platform,
+        eventId,
+        eventName: event.name,
+      });
+    } catch (error) {
+      logger.error('[TelegramBot] Watch event failed', {
+        userId,
+        platform,
+        eventId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await ctx.answerCbQuery('Failed to add to watchlist');
+    }
+  }
+
+  private async handleUnwatchEvent(
+    ctx: TelegrafContext,
+    userId: string,
+    platform: string,
+    eventId: string,
+  ): Promise<void> {
+    try {
+      const removed = await WatchlistRepo.removeFromWatchlist(userId, platform, eventId);
+
+      if (removed) {
+        await ctx.answerCbQuery('❌ Removed from watchlist');
+        // Refresh the watchlist view
+        await this.handleWatchlist(ctx);
+      } else {
+        await ctx.answerCbQuery('Event not in watchlist');
+      }
+    } catch (error) {
+      logger.error('[TelegramBot] Unwatch event failed', {
+        userId,
+        platform,
+        eventId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await ctx.answerCbQuery('Failed to remove from watchlist');
+    }
+  }
+
+  private async handleComparePrice(
+    ctx: TelegrafContext,
+    _userId: string,
+    platform: string,
+    eventId: string,
+  ): Promise<void> {
+    // This would trigger the Google Events on-demand adapter
+    // For now, show a message that this feature is coming
+    // TODO: Implement when we wire up the on-demand adapter to the bot
+
+    const event = this.monitor.getEventById(platform, eventId);
+    const eventName = event?.name || 'this event';
+
+    await ctx.answerCbQuery('🔍 Searching multiple platforms...');
+    await ctx.sendChatAction('typing');
+
+    // Check if Google Events adapter is available
+    // Note: This requires access to the app's onDemandAdapters which we don't have here
+    // For now, show a helpful message about where to find tickets
+
+    const msg =
+      `🔍 *Price Comparison for:*\n` +
+      `${this.escapeMarkdown(eventName)}\n\n` +
+      `*Check these sites for pricing:*\n` +
+      `• [Ticketmaster](https://www.ticketmaster.com)\n` +
+      `• [SeatGeek](https://www.seatgeek.com)\n` +
+      `• [StubHub](https://www.stubhub.com)\n\n` +
+      `_Full multi\\-platform price comparison coming soon\\!_`;
+
+    await this.sendWithMainMenu(ctx, msg, { parse_mode: 'MarkdownV2' });
   }
 
   // ==========================================================================

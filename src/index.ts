@@ -30,13 +30,17 @@ import * as SubRepo from './data/repositories/subscription.repository.js';
 import * as AlertRepo from './data/repositories/alert.repository.js';
 import * as PriceHistoryRepo from './data/repositories/price-history.repository.js';
 import * as EventGroupRepo from './data/repositories/event-group.repository.js';
+import * as WatchlistRepo from './data/repositories/watchlist.repository.js';
 
 // ============================================================================
 // Application Class
 // ============================================================================
 
 export class SeatSniperApp {
+  /** Free adapters used for auto-polling (Ticketmaster, etc.) */
   private adapters: Map<string, IPlatformAdapter> = new Map();
+  /** Paid/on-demand adapters - only used when user explicitly requests (Google Events) */
+  private onDemandAdapters: Map<string, IPlatformAdapter> = new Map();
   private notifiers: Map<string, INotifier> = new Map();
   private valueEngine: ValueEngineService;
   private monitor: MonitorService | null = null;
@@ -77,6 +81,7 @@ export class SeatSniperApp {
         await AlertRepo.ensureTable();
         await PriceHistoryRepo.ensureTable();
         await EventGroupRepo.ensureTable();
+        await WatchlistRepo.ensureTable();
         this.dbAvailable = true;
         logger.info('  ✓ PostgreSQL connected');
       } else {
@@ -138,14 +143,16 @@ export class SeatSniperApp {
       logger.info('  - SeatGeek adapter skipped (no credentials)');
     }
 
-    // Google Events (via Apify) - fallback/alternative data source
+    // Google Events (via Apify) - ON-DEMAND ONLY (costs ~$0.035/search)
+    // Not added to auto-polling adapters to avoid burning through credits
     if (config.apify.token) {
       try {
         const googleEvents = new GoogleEventsAdapter();
         await googleEvents.initialize();
         if (googleEvents.isEnabled()) {
-          this.adapters.set('google-events', googleEvents);
-          logger.info('  ✓ Google Events adapter ready (via Apify)');
+          // Store in onDemandAdapters, NOT in adapters (which are auto-polled)
+          this.onDemandAdapters.set('google-events', googleEvents);
+          logger.info('  ✓ Google Events adapter ready (on-demand only, ~$0.035/search)');
         } else {
           logger.info('  - Google Events adapter skipped (disabled)');
         }
@@ -222,10 +229,18 @@ export class SeatSniperApp {
   // ==========================================================================
 
   /**
-   * Get available platform adapters
+   * Get available platform adapters (free, used for auto-polling)
    */
   getAdapters(): Map<string, IPlatformAdapter> {
     return this.adapters;
+  }
+
+  /**
+   * Get on-demand adapters (paid per use, only triggered by user action)
+   * e.g., Google Events via Apify (~$0.035/search)
+   */
+  getOnDemandAdapters(): Map<string, IPlatformAdapter> {
+    return this.onDemandAdapters;
   }
 
   /**
@@ -388,6 +403,7 @@ export class SeatSniperApp {
     await closePool();
 
     this.adapters.clear();
+    this.onDemandAdapters.clear();
     this.notifiers.clear();
 
     logger.info('🛑 SeatSniper stopped');
