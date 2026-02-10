@@ -23,6 +23,28 @@ import { matchEvents, findMatchesForEvent, type EventMatch } from '../matching/e
 import { comparePrices, type EventComparison } from '../value-engine/price-comparator.js';
 
 // ============================================================================
+// Utilities
+// ============================================================================
+
+/** Default timeout for adapter operations (30 seconds) */
+const ADAPTER_TIMEOUT_MS = 30_000;
+
+/** Maximum alert history size to prevent memory bloat */
+const MAX_ALERT_HISTORY = 50_000;
+
+/**
+ * Wrap a promise with a timeout
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, operation: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`${operation} timed out after ${ms}ms`)), ms)
+    ),
+  ]);
+}
+
+// ============================================================================
 // Types
 // ============================================================================
 
@@ -255,11 +277,15 @@ export class MonitorService {
           limit: 100,
         };
 
-        // Query all adapters in parallel per city
+        // Query all adapters in parallel per city with timeout protection
         const adapterPromises = [...this.adapters.entries()].map(
           async ([name, adapter]) => {
             try {
-              const events = await adapter.searchEvents(searchParams);
+              const events = await withTimeout(
+                adapter.searchEvents(searchParams),
+                ADAPTER_TIMEOUT_MS,
+                `${name}.searchEvents(${city})`,
+              );
               logger.debug(`[Monitor] ${name} found ${events.length} events in ${city}`);
               return events;
             } catch (error) {
@@ -731,6 +757,13 @@ export class MonitorService {
     const cutoff = Date.now() - 24 * 60 * 60 * 1000; // Keep 24 hours
     const before = this.alertHistory.length;
     this.alertHistory = this.alertHistory.filter(r => r.sentAt.getTime() > cutoff);
+
+    // Also enforce max size limit to prevent unbounded growth
+    if (this.alertHistory.length > MAX_ALERT_HISTORY) {
+      const excess = this.alertHistory.length - MAX_ALERT_HISTORY;
+      this.alertHistory = this.alertHistory.slice(excess);
+      logger.warn(`[Monitor] Truncated ${excess} oldest alert records (size limit)`);
+    }
 
     if (before !== this.alertHistory.length) {
       logger.debug(`[Monitor] Pruned ${before - this.alertHistory.length} alert records`);

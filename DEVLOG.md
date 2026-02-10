@@ -5,9 +5,9 @@
 
 ---
 
-## CURRENT STATE (as of 2026-02-05, session 9)
+## CURRENT STATE (as of 2026-02-06, session 10)
 
-**Completion: ~90%** (up from 82%)
+**Completion: ~92%** (up from 90%)
 
 ### What runs right now
 - `npm run build` compiles clean (tsup bundles 200KB ESM)
@@ -88,6 +88,51 @@
 ---
 
 ## WHAT WAS DONE EACH SESSION
+
+### Session: 2026-02-06 (Session 10) — Reliability Hardening & Telegram Bot Robustness
+
+**Completion: 90% → 92%**
+
+#### Major Issues Fixed
+
+**Telegram Bot Reliability (8 fixes):**
+1. **409 Conflict auto-recovery** — Bot now detects 409 errors and attempts automatic recovery with exponential backoff (5s, 10s, 20s...) up to 5 times
+2. **Initialization retry** — TelegramNotifier retries up to 3 times with 15s delays if API returns temporary errors
+3. **Safe command handlers** — All 9 bot commands wrapped with try-catch to prevent crashes from bubbling up
+4. **Shutdown protection** — Added `isShuttingDown` flag to reject handlers during shutdown, preventing crashes
+5. **Memory leak: mutedEvents** — Added `MAX_MUTED_EVENTS=10000` limit with automatic pruning
+6. **Memory leak: sessions** — Added `MAX_SESSIONS=5000` limit with LRU eviction
+7. **Double timer prevention** — `start()` now clears existing prune timer before creating new one
+8. **Removed logOut API** — Was causing 10-minute token invalidation; now uses clearWebhook only
+
+**Callback Validation (2 fixes):**
+9. **Ticket callback parsing** — Added validation for malformed callback data (missing colons, empty parts)
+10. **ChatId edge cases** — New `getChatId()` helper properly handles numeric 0 and edge cases
+
+**Monitor Service Hardening (3 fixes):**
+11. **Adapter timeout** — All `searchEvents()` and `getEventListings()` calls now wrapped with 30s timeout
+12. **Alert history limit** — Added `MAX_ALERT_HISTORY=50000` cap to prevent unbounded growth
+13. **withTimeout utility** — Reusable promise timeout wrapper with descriptive error messages
+
+**View Tickets Flow:**
+14. **Direct Ticketmaster links** — Since Top Picks API requires separate approval, "View Tickets" now shows event details with "Buy on Ticketmaster" button linking directly to ticket page
+
+#### Files Modified
+- `src/notifications/telegram/telegram.bot.ts` — Retry logic, error handling, memory limits, shutdown flag
+- `src/notifications/telegram/telegram.notifier.ts` — Initialization retry with backoff
+- `src/services/monitoring/monitor.service.ts` — Timeout wrapper, alert history limit, getEventById()
+
+#### Metrics
+- Bundle size: 233KB ESM (up from 224KB)
+- Tests: 274 passing (unchanged)
+- Build: Clean
+
+#### Learnings
+- **Never use `bot.telegram.callApi('logOut')`** — It invalidates the token for 10 minutes and requires regeneration via BotFather
+- **409 Conflict** usually means another bot instance is polling; can be fixed by waiting or calling `deleteWebhook`
+- **Memory limits are critical** — Maps without size limits can grow indefinitely between restarts
+
+---
 
 ### Session: 2026-02-05 (Session 9) — Cross-Platform Price Comparison
 

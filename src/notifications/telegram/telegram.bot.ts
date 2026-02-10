@@ -73,6 +73,12 @@ const MENU_LABELS = new Set<string>(Object.values(MENU));
 // Telegram Bot Service
 // ============================================================================
 
+/** Maximum size for muted events map to prevent memory leaks */
+const MAX_MUTED_EVENTS = 10000;
+
+/** Maximum size for sessions map */
+const MAX_SESSIONS = 5000;
+
 export class TelegramBotService {
   private bot: Telegraf;
   private monitor: MonitorService;
@@ -80,6 +86,7 @@ export class TelegramBotService {
   private sessionPruneTimer: NodeJS.Timeout | null = null;
   private mutedEvents: MutedEvents = new Map();
   private isRunning = false;
+  private isShuttingDown = false;
 
   /**
    * @param monitor - The monitoring service to wire commands to
@@ -124,9 +131,15 @@ export class TelegramBotService {
       this.launchPolling();
 
       this.isRunning = true;
+      this.isShuttingDown = false;
 
-      // Prune stale sessions every 5 minutes
-      this.sessionPruneTimer = setInterval(() => this.pruneSessions(), 5 * 60 * 1000);
+      // Clear any existing timer before creating new one (prevent duplicate timers)
+      if (this.sessionPruneTimer) {
+        clearInterval(this.sessionPruneTimer);
+      }
+
+      // Prune stale sessions and muted events every 5 minutes
+      this.sessionPruneTimer = setInterval(() => this.pruneResources(), 5 * 60 * 1000);
 
       logger.info(`[TelegramBot] Bot is live — @${botInfo.username}`);
     } catch (error) {
@@ -230,6 +243,8 @@ export class TelegramBotService {
   async stop(): Promise<void> {
     if (!this.isRunning) return;
 
+    // Set shutdown flag to reject new handlers
+    this.isShuttingDown = true;
     this.isRunning = false;
 
     if (this.sessionPruneTimer) {
@@ -237,6 +252,7 @@ export class TelegramBotService {
       this.sessionPruneTimer = null;
     }
     this.sessions.clear();
+    this.mutedEvents.clear();
 
     try {
       this.bot.stop('SIGTERM');
@@ -275,18 +291,51 @@ export class TelegramBotService {
     return this.isRunning;
   }
 
-  private pruneSessions(): void {
+  /**
+   * Prune stale sessions and enforce size limits on maps to prevent memory leaks
+   */
+  private pruneResources(): void {
     const now = Date.now();
-    let pruned = 0;
+
+    // Prune expired sessions
+    let prunedSessions = 0;
     for (const [chatId, session] of this.sessions) {
       if (now - session.createdAt > SESSION_TTL_MS) {
         this.sessions.delete(chatId);
-        pruned++;
+        prunedSessions++;
       }
     }
-    if (pruned > 0) {
-      logger.debug(`[TelegramBot] Pruned ${pruned} stale sessions`);
+
+    // Enforce max sessions limit (remove oldest if over limit)
+    if (this.sessions.size > MAX_SESSIONS) {
+      const excess = this.sessions.size - MAX_SESSIONS;
+      const iterator = this.sessions.keys();
+      for (let i = 0; i < excess; i++) {
+        const key = iterator.next().value;
+        if (key) this.sessions.delete(key);
+      }
+      prunedSessions += excess;
     }
+
+    // Enforce max muted events limit (clear oldest entries)
+    if (this.mutedEvents.size > MAX_MUTED_EVENTS) {
+      const excess = this.mutedEvents.size - MAX_MUTED_EVENTS;
+      const iterator = this.mutedEvents.keys();
+      for (let i = 0; i < excess; i++) {
+        const key = iterator.next().value;
+        if (key) this.mutedEvents.delete(key);
+      }
+      logger.debug(`[TelegramBot] Pruned ${excess} old muted events (size limit)`);
+    }
+
+    if (prunedSessions > 0) {
+      logger.debug(`[TelegramBot] Pruned ${prunedSessions} stale sessions`);
+    }
+  }
+
+  // Keep old method name for backwards compatibility
+  private pruneSessions(): void {
+    this.pruneResources();
   }
 
   // ==========================================================================
@@ -316,16 +365,37 @@ export class TelegramBotService {
   }
 
   // ==========================================================================
+  // Helpers
+  // ==========================================================================
+
+  /**
+   * Safely extract chatId from context, handling edge cases
+   * Returns null if chatId cannot be determined
+   */
+  private getChatId(ctx: TelegrafContext): string | null {
+    const id = ctx.chat?.id;
+    // Handle undefined, null, and edge case where id is 0 (falsy but valid)
+    if (id === undefined || id === null) return null;
+    return String(id);
+  }
+
+  // ==========================================================================
   // Command Registration
   // ==========================================================================
 
   private registerHandlers(): void {
-    // Helper to wrap handlers with error catching
+    // Helper to wrap handlers with error catching and shutdown check
     const safeHandler = <T extends TelegrafContext>(
       handler: (ctx: T) => Promise<void>,
       name: string,
     ) => {
       return async (ctx: T) => {
+        // Reject handlers during shutdown
+        if (this.isShuttingDown) {
+          logger.debug(`[TelegramBot] Rejecting ${name} handler during shutdown`);
+          return;
+        }
+
         try {
           await handler(ctx);
         } catch (error) {
@@ -382,7 +452,7 @@ export class TelegramBotService {
   // ==========================================================================
 
   private async handleStart(ctx: TelegrafContext): Promise<void> {
-    const chatId = ctx.chat?.id?.toString();
+    const chatId = this.getChatId(ctx);
     if (!chatId) return;
 
     const welcome =
@@ -1192,7 +1262,16 @@ export class TelegramBotService {
       if (parts.length >= 3) {
         const platform = parts[1];
         const eventId = parts.slice(2).join(':'); // Handle IDs with colons
-        await this.handleViewTickets(ctx, platform, eventId);
+        // Validate platform and eventId are non-empty
+        if (platform && eventId) {
+          await this.handleViewTickets(ctx, platform, eventId);
+        } else {
+          logger.warn('[TelegramBot] Invalid ticket callback data', { data });
+          await ctx.answerCbQuery('Invalid event data');
+        }
+      } else {
+        logger.warn('[TelegramBot] Malformed ticket callback', { data, parts: parts.length });
+        await ctx.answerCbQuery('Invalid request');
       }
       return;
     }
