@@ -5,9 +5,9 @@
 
 ---
 
-## CURRENT STATE (as of 2026-02-06, session 10)
+## CURRENT STATE (as of 2026-02-10, session 11)
 
-**Completion: ~92%** (up from 90%)
+**Completion: ~93%** (up from 92%)
 
 ### What runs right now
 - `npm run build` compiles clean (tsup bundles 200KB ESM)
@@ -58,6 +58,7 @@
 | Component | Status | Notes |
 |-----------|--------|-------|
 | **Ticketmaster adapter** | ✅ LIVE | API key configured, 520+ Portland events, 1,100+ Seattle events |
+| **Google Events adapter** | ✅ NEW | Via Apify, scrapes Google Events for multi-platform data |
 | StubHub adapter | Code ready | OAuth 2.0, requires approval — overkill for MVP |
 | SeatGeek adapter | Code ready | Events, listings, seat maps — nice-to-have Phase 2 |
 | Value Engine | Works | 5-component weighted scoring algorithm |
@@ -77,7 +78,7 @@
 | Shutdown | **Hardened** | Double-shutdown guard, signal dedup |
 | Redis cache | NOT STARTED | Configured in Docker, zero code uses it |
 | TypeScript | **Clean** | 0 errors |
-| Test suite | **246 tests** | 11 test files, all passing |
+| Test suite | **274 tests** | 13 test files, all passing |
 
 ### What DOESN'T work (blocking production)
 1. ~~**Needs real API keys**~~ → **DONE: Ticketmaster API working** (2026-02-03)
@@ -88,6 +89,55 @@
 ---
 
 ## WHAT WAS DONE EACH SESSION
+
+### Session: 2026-02-10 (Session 11) — Google Events Adapter (API Alternative)
+
+**Completion: 92% → 93%**
+
+#### Problem: No API Access to StubHub/SeatGeek
+- StubHub and SeatGeek API approval requests have been pending for over a week
+- Need an alternative data source for ticket pricing that doesn't require official API access
+
+#### Solution: Google Events via Apify
+Integrated Google Events scraping through Apify as a fallback data source.
+
+**What Google Events provides:**
+- Event listings from Google's aggregated event search
+- Links to multiple ticket sources (SeatGeek, StubHub, Ticketmaster, Etix)
+- Price hints extracted from SeatGeek URL params (`ref_price=XX.XX`)
+- Venue info with ratings
+- ~10 events per page, costs ~$0.035/search (~100 searches for $3.30 free tier)
+
+**New Files Created:**
+- `src/adapters/google-events/google-events.adapter.ts` — Apify actor integration
+- `src/adapters/google-events/google-events.mapper.ts` — Response to NormalizedEvent mapping
+- `src/adapters/google-events/google-events.types.ts` — Type definitions
+- `src/adapters/google-events/index.ts` — Module exports
+
+**Config Changes:**
+- Added `APIFY_TOKEN` env var support in `.env` and config schema
+- Added `apify` config section with token and actorId
+
+**Integration:**
+- GoogleEventsAdapter added to `initializeAdapters()` in main index.ts
+- Adapter only activates if APIFY_TOKEN is configured and valid
+- Falls back gracefully if disabled - doesn't break existing flow
+
+**Testing:**
+- Tested live with "concerts in Portland OR" query
+- Successfully returned 10 events with ticket info
+- Extracted prices from SeatGeek URLs (e.g., $48.70, $127.68, $63.81)
+
+**Limitations:**
+- No individual ticket listings (section/row) - just event-level data
+- Best used for event discovery, not detailed listing analysis
+- Costs money (though minimal - ~$0.035/search)
+
+#### Tests
+- All 274 tests pass
+- Build clean (247KB bundle)
+
+---
 
 ### Session: 2026-02-06 (Session 10) — Reliability Hardening & Telegram Bot Robustness
 

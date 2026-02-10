@@ -10,6 +10,7 @@ import { logger } from './utils/logger.js';
 import { StubHubAdapter } from './adapters/stubhub/stubhub.adapter.js';
 import { TicketmasterAdapter } from './adapters/ticketmaster/ticketmaster.adapter.js';
 import { SeatGeekAdapter } from './adapters/seatgeek/seatgeek.adapter.js';
+import { GoogleEventsAdapter } from './adapters/google-events/google-events.adapter.js';
 import type { IPlatformAdapter } from './adapters/base/platform-adapter.interface.js';
 
 // Services
@@ -135,6 +136,26 @@ export class SeatSniperApp {
       }
     } else {
       logger.info('  - SeatGeek adapter skipped (no credentials)');
+    }
+
+    // Google Events (via Apify) - fallback/alternative data source
+    if (config.apify.token) {
+      try {
+        const googleEvents = new GoogleEventsAdapter();
+        await googleEvents.initialize();
+        if (googleEvents.isEnabled()) {
+          this.adapters.set('google-events', googleEvents);
+          logger.info('  ✓ Google Events adapter ready (via Apify)');
+        } else {
+          logger.info('  - Google Events adapter skipped (disabled)');
+        }
+      } catch (error) {
+        logger.warn('  ✗ Google Events adapter failed to initialize', {
+          error: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
+    } else {
+      logger.info('  - Google Events adapter skipped (no APIFY_TOKEN)');
     }
 
     if (this.adapters.size === 0) {

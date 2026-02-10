@@ -52,6 +52,9 @@ const envSchema = z.object({
   TWILIO_PHONE_NUMBER: z.string().optional(),
   TWILIO_WHATSAPP_NUMBER: z.string().optional(),
 
+  // Apify (for Google Events scraping)
+  APIFY_TOKEN: z.string().optional(),
+
   // Monitoring
   MONITORED_CITIES: z.string().default('portland,seattle'),
 });
@@ -137,6 +140,12 @@ export const config = {
     authToken: env.TWILIO_AUTH_TOKEN || '',
     phoneNumber: env.TWILIO_PHONE_NUMBER || '',
     whatsappNumber: env.TWILIO_WHATSAPP_NUMBER || '',
+  },
+
+  // Apify configuration (for Google Events scraping)
+  apify: {
+    token: env.APIFY_TOKEN || '',
+    googleEventsActorId: 'DfdUgh7nBLKe78irv',
   },
 
   // Monitoring configuration
