@@ -1351,9 +1351,18 @@ export class TelegramBotService {
     const text = (ctx.message && 'text' in ctx.message) ? ctx.message.text?.trim() : '';
     if (!text) return;
 
+    // Skip if it's a command (starts with /)
+    if (text.startsWith('/')) {
+      logger.debug('[TelegramBot] Skipping text handler for command', { text });
+      return;
+    }
+
+    logger.debug('[TelegramBot] handleText received', { chatId, text, isMenuLabel: MENU_LABELS.has(text) });
+
     // --- Reply keyboard button routing ---
     // If user taps a menu button while mid-wizard, clear the session first
     if (MENU_LABELS.has(text)) {
+      logger.debug('[TelegramBot] Menu button matched', { text });
       this.sessions.delete(chatId);
 
       switch (text) {
