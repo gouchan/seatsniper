@@ -19,7 +19,7 @@
 import { Telegraf, Markup } from 'telegraf';
 import type { Context as TelegrafContext } from 'telegraf';
 import type { MonitorService, Subscription } from '../../services/monitoring/monitor.service.js';
-// Note: NormalizedEvent is used via monitor.getEventById() return type
+import type { IPlatformAdapter, EventSearchParams } from '../../adapters/base/platform-adapter.interface.js';
 import * as SubRepo from '../../data/repositories/subscription.repository.js';
 import * as WatchlistRepo from '../../data/repositories/watchlist.repository.js';
 import { logger } from '../../utils/logger.js';
@@ -84,6 +84,7 @@ const MAX_SESSIONS = 5000;
 export class TelegramBotService {
   private bot: Telegraf;
   private monitor: MonitorService;
+  private onDemandAdapters: Map<string, IPlatformAdapter>;
   private sessions: Map<string, UserSession> = new Map();
   private sessionPruneTimer: NodeJS.Timeout | null = null;
   private mutedEvents: MutedEvents = new Map();
@@ -95,14 +96,20 @@ export class TelegramBotService {
    * @param existingBot - Optional shared Telegraf instance (from TelegramNotifier).
    *                      If provided, this service registers handlers on it and
    *                      manages the long-polling lifecycle.
+   * @param onDemandAdapters - Paid adapters (like Google Events) only triggered by user action
    */
-  constructor(monitor: MonitorService, existingBot?: Telegraf) {
+  constructor(
+    monitor: MonitorService,
+    existingBot?: Telegraf,
+    onDemandAdapters?: Map<string, IPlatformAdapter>,
+  ) {
     if (!existingBot && !config.telegram.botToken) {
       throw new Error('Telegram bot token not configured');
     }
 
     this.bot = existingBot ?? new Telegraf(config.telegram.botToken);
     this.monitor = monitor;
+    this.onDemandAdapters = onDemandAdapters ?? new Map();
     this.registerHandlers();
   }
 
@@ -1627,34 +1634,131 @@ export class TelegramBotService {
 
   private async handleComparePrice(
     ctx: TelegrafContext,
-    _userId: string,
+    userId: string,
     platform: string,
     eventId: string,
   ): Promise<void> {
-    // This would trigger the Google Events on-demand adapter
-    // For now, show a message that this feature is coming
-    // TODO: Implement when we wire up the on-demand adapter to the bot
-
     const event = this.monitor.getEventById(platform, eventId);
-    const eventName = event?.name || 'this event';
+    const eventName = event?.name || 'Unknown Event';
+    const venueCity = event?.venue?.city || 'Portland';
 
     await ctx.answerCbQuery('🔍 Searching multiple platforms...');
     await ctx.sendChatAction('typing');
 
     // Check if Google Events adapter is available
-    // Note: This requires access to the app's onDemandAdapters which we don't have here
-    // For now, show a helpful message about where to find tickets
+    const googleEventsAdapter = this.onDemandAdapters.get('google-events');
 
-    const msg =
-      `🔍 *Price Comparison for:*\n` +
-      `${this.escapeMarkdown(eventName)}\n\n` +
-      `*Check these sites for pricing:*\n` +
-      `• [Ticketmaster](https://www.ticketmaster.com)\n` +
-      `• [SeatGeek](https://www.seatgeek.com)\n` +
-      `• [StubHub](https://www.stubhub.com)\n\n` +
-      `_Full multi\\-platform price comparison coming soon\\!_`;
+    if (!googleEventsAdapter) {
+      // No Google Events adapter configured - show manual search links
+      const msg =
+        `🔍 *Price Comparison for:*\n` +
+        `${this.escapeMarkdown(eventName)}\n\n` +
+        `_Google Events adapter not configured\\._\n\n` +
+        `*Check these sites manually:*\n` +
+        `• [Ticketmaster](https://www.ticketmaster.com)\n` +
+        `• [SeatGeek](https://www.seatgeek.com)\n` +
+        `• [StubHub](https://www.stubhub.com)\n`;
 
-    await this.sendWithMainMenu(ctx, msg, { parse_mode: 'MarkdownV2' });
+      await this.sendWithMainMenu(ctx, msg, { parse_mode: 'MarkdownV2' });
+      return;
+    }
+
+    try {
+      // Build search query from event name
+      const searchQuery = `${eventName} ${venueCity}`;
+      const searchParams: EventSearchParams = {
+        city: venueCity,
+        startDate: new Date(),
+        endDate: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+        keyword: eventName,
+        limit: 10,
+      };
+
+      logger.info('[TelegramBot] Compare Prices: calling Google Events', {
+        userId,
+        platform,
+        eventId,
+        searchQuery,
+      });
+
+      // Call the Google Events adapter (~$0.035 per search)
+      const results = await googleEventsAdapter.searchEvents(searchParams);
+
+      if (results.length === 0) {
+        const msg =
+          `🔍 *Price Comparison for:*\n` +
+          `${this.escapeMarkdown(eventName)}\n\n` +
+          `_No additional listings found on other platforms\\._\n\n` +
+          `The event may only be available on ${this.escapeMarkdown(platform)}\\.\n` +
+          `Cost: ~$0\\.035`;
+
+        await this.sendWithMainMenu(ctx, msg, { parse_mode: 'MarkdownV2' });
+        return;
+      }
+
+      // Build comparison response
+      let msg = `🔍 *Price Comparison for:*\n${this.escapeMarkdown(eventName)}\n`;
+      msg += `━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+      // Group by platform
+      const byPlatform = new Map<string, typeof results>();
+      for (const evt of results) {
+        const p = evt.platform;
+        if (!byPlatform.has(p)) byPlatform.set(p, []);
+        byPlatform.get(p)!.push(evt);
+      }
+
+      for (const [plat, events] of byPlatform) {
+        const platIcon = plat === 'ticketmaster' ? '🎫' : plat === 'seatgeek' ? '🎟️' : '🎪';
+        msg += `${platIcon} *${this.escapeMarkdown(plat.charAt(0).toUpperCase() + plat.slice(1))}*\n`;
+
+        for (const evt of events.slice(0, 3)) {
+          const priceStr = evt.priceRange
+            ? `$${evt.priceRange.min}${evt.priceRange.max ? `–$${evt.priceRange.max}` : ''}`
+            : 'Price TBD';
+          msg += `   ${this.escapeMarkdown(priceStr)}`;
+          if (evt.url) {
+            msg += ` [View](${evt.url})`;
+          }
+          msg += `\n`;
+        }
+        msg += `\n`;
+      }
+
+      msg += `_Found ${results.length} listing\\(s\\) \\| Cost: ~$0\\.035_`;
+
+      // Update watchlist with latest prices if found
+      if (results.length > 0 && results[0].priceRange?.min) {
+        await WatchlistRepo.updatePrices(
+          userId,
+          platform,
+          eventId,
+          results[0].priceRange.min,
+          results[0].priceRange.max || results[0].priceRange.min,
+        );
+      }
+
+      await this.sendWithMainMenu(ctx, msg, { parse_mode: 'MarkdownV2' });
+
+      logger.info('[TelegramBot] Compare Prices: complete', {
+        userId,
+        resultsFound: results.length,
+      });
+    } catch (error) {
+      logger.error('[TelegramBot] Compare Prices failed', {
+        userId,
+        platform,
+        eventId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+
+      const msg =
+        `🔍 *Price Comparison for:*\n` +
+        `${this.escapeMarkdown(eventName)}\n\n` +
+        `❌ _Search failed\\. Please try again later\\._`;
+
+      await this.sendWithMainMenu(ctx, msg, { parse_mode: 'MarkdownV2' });
+    }
   }
 
   // ==========================================================================

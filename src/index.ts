@@ -331,7 +331,12 @@ export class SeatSniperApp {
     if (config.telegram.botToken && this.notifiers.has('telegram')) {
       try {
         const telegramNotifier = this.notifiers.get('telegram') as TelegramNotifier;
-        this.telegramBot = new TelegramBotService(this.monitor, telegramNotifier.bot);
+        // Pass on-demand adapters so bot can trigger paid searches (e.g., Google Events)
+        this.telegramBot = new TelegramBotService(
+          this.monitor,
+          telegramNotifier.bot,
+          this.onDemandAdapters,
+        );
         await this.telegramBot.start();
         logger.info('  ✓ Telegram bot UX active (shared instance)');
       } catch (error) {
