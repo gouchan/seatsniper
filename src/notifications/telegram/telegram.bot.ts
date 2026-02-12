@@ -349,11 +349,12 @@ export class TelegramBotService {
 
   /** Single source of truth for the main menu keyboard layout */
   private mainMenuKeyboard() {
+    // Flywheel order: Discover → Track → Monitor → Control → Utility
     return Markup.keyboard([
-      [MENU.SCAN, MENU.SEARCH, MENU.WATCHLIST],
-      [MENU.SUBSCRIBE, MENU.STATUS],
-      [MENU.SETTINGS, MENU.PAUSE],
-      [MENU.RESUME, MENU.HELP],
+      [MENU.SCAN, MENU.SEARCH, MENU.WATCHLIST],  // Discovery
+      [MENU.STATUS, MENU.SUBSCRIBE],              // Monitor & Alert
+      [MENU.PAUSE, MENU.RESUME],                  // Alert control
+      [MENU.SETTINGS, MENU.HELP],                 // Utility
     ]).resize().persistent();
   }
 
