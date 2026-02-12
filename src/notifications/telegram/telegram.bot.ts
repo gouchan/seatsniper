@@ -57,7 +57,7 @@ type MutedEvents = Map<string, Set<string>>;
 // ============================================================================
 
 const MENU = {
-  SCAN:      '📡 Scan',
+  SCAN:      '🎯 Snipe',
   SEARCH:    '🔎 Search',
   WATCHLIST: '⭐ Watchlist',
   SUBSCRIBE: '🔔 Alert Me',
@@ -466,7 +466,7 @@ export class TelegramBotService {
       `🎯 Welcome to SeatSniper!\n\n` +
       `I find the best-value tickets across multiple platforms and alert you when great deals appear.\n\n` +
       `GET STARTED:\n` +
-      `📡 Scan — Quick scan for deals in a city\n` +
+      `🎯 Snipe — Quick scan a city for deals\n` +
       `🔔 Alert Me — Set up automatic deal alerts\n` +
       `⭐ Watchlist — Track specific events\n\n` +
       `Tap a button below to begin 👇`;
@@ -553,11 +553,8 @@ export class TelegramBotService {
 
     await ctx.reply(
       '⚠️ Are you sure you want to unsubscribe? You\'ll stop receiving deal alerts.\n\n' +
-      '_Tip: Use /pause to mute alerts temporarily instead._',
-      {
-        parse_mode: 'MarkdownV2',
-        ...Markup.inlineKeyboard(buttons),
-      },
+      'Tip: Use /pause to mute alerts temporarily instead.',
+      Markup.inlineKeyboard(buttons),
     );
   }
 
@@ -637,7 +634,7 @@ export class TelegramBotService {
 
     const rawText = (ctx.message && 'text' in ctx.message) ? ctx.message.text : '';
 
-    // If called from reply keyboard ("🔍 Scan") or bare /scan, show city picker.
+    // If called from reply keyboard ("🎯 Snipe") or bare /scan, show city picker.
     // Only parse a city arg from "/scan <city>" — not from the button label.
     const isSlashCommand = rawText.startsWith('/scan');
     const city = isSlashCommand ? rawText.split(/\s+/)[1]?.toLowerCase() : undefined;
@@ -672,7 +669,7 @@ export class TelegramBotService {
     // Show typing indicator so user sees activity
     await ctx.sendChatAction('typing');
 
-    await ctx.reply(`🔍 Scanning ${sanitized}... This may take up to 30 seconds.`);
+    await ctx.reply(`🎯 Sniping ${sanitized}... This may take up to 30 seconds.`);
 
     try {
       // Race the scan against a timeout
@@ -689,9 +686,8 @@ export class TelegramBotService {
       }
 
       const cityTitle = sanitized.charAt(0).toUpperCase() + sanitized.slice(1);
-      let response =
-        `📊 *${this.escapeMarkdown(cityTitle)} — ${result.events} Events Found*\n` +
-        `━━━━━━━━━━━━━━━━━━━━━\n\n`;
+      let response = `📊 ${cityTitle} — ${result.events} Events Found\n`;
+      response += `━━━━━━━━━━━━━━━━━━━━━\n\n`;
 
       // Show upcoming events with details
       // Build inline buttons for each event (View Tickets)
@@ -710,14 +706,14 @@ export class TelegramBotService {
           const categoryIcon = this.getCategoryIcon(evt.category);
           const platformIcon = this.getPlatformIndicator(evt.platform);
           const priceLine = evt.priceRange
-            ? `💰 $${evt.priceRange.min}–$${evt.priceRange.max}`
+            ? `💰 $${evt.priceRange.min}-$${evt.priceRange.max}`
             : '💰 Price TBD';
 
           response +=
-            `${categoryIcon}${platformIcon} *${this.escapeMarkdown(evt.name)}*\n` +
-            `   📍 ${this.escapeMarkdown(evt.venue.name)}\n` +
-            `   📅 ${this.escapeMarkdown(dateStr + ', ' + timeStr)}\n` +
-            `   ${this.escapeMarkdown(priceLine)}\n\n`;
+            `${categoryIcon}${platformIcon} ${evt.name}\n` +
+            `   📍 ${evt.venue.name}\n` +
+            `   📅 ${dateStr}, ${timeStr}\n` +
+            `   ${priceLine}\n\n`;
 
           // Button label: include date to differentiate events
           const buttonLabel = `🎟️ ${dateStr} - Buy`;
@@ -737,38 +733,32 @@ export class TelegramBotService {
         }
 
         if (result.events > result.upcomingEvents.length) {
-          response += `_\\.\\.\\. and ${result.events - result.upcomingEvents.length} more events_\n\n`;
+          response += `... and ${result.events - result.upcomingEvents.length} more events\n\n`;
         }
       }
 
       // Show top picks if any listings were scored
       if (result.topPicks.length > 0) {
-        response += `🔥 *Best Deals:*\n`;
+        response += `🔥 Best Deals:\n`;
         for (const pick of result.topPicks.slice(0, 5)) {
           const l = pick.listing;
           const s = pick.score;
-          const buyLink = l.deepLink ? ` [Buy](${l.deepLink})` : '';
           response +=
-            `\n${this.getScoreEmoji(s.totalScore)} *Score ${s.totalScore}/100*\n` +
-            `   ${this.escapeMarkdown(l.section)} Row ${this.escapeMarkdown(l.row)} — ` +
-            `${this.escapeMarkdown(`$${l.pricePerTicket}/ea`)} ${this.escapeMarkdown(`(${l.quantity} avail)`)}` +
-            `${buyLink}\n` +
-            `   _${this.escapeMarkdown(s.reasoning)}_\n`;
+            `\n${this.getScoreEmoji(s.totalScore)} Score ${s.totalScore}/100\n` +
+            `   ${l.section} Row ${l.row} — $${l.pricePerTicket}/ea (${l.quantity} avail)\n` +
+            `   ${s.reasoning}\n`;
         }
       }
 
-      response += `\n_Tap 🎟️ to buy, ⭐ to track, or 🔔 Alert Me for deals${this.escapeMarkdown('!')}_`;
+      response += `\nTap 🎟️ to buy, ⭐ to track, or 🔔 Alert Me for deals!`;
 
       // Send with inline buttons if we have events
       if (eventButtons.length > 0) {
-        await ctx.reply(response, {
-          parse_mode: 'MarkdownV2',
-          ...Markup.inlineKeyboard(eventButtons),
-        });
+        await ctx.reply(response, Markup.inlineKeyboard(eventButtons));
         // Follow up with the main menu keyboard
         await this.sendWithMainMenu(ctx, '👆 Tap an event above to see tickets');
       } else {
-        await this.sendWithMainMenu(ctx, response, { parse_mode: 'MarkdownV2' });
+        await this.sendWithMainMenu(ctx, response);
       }
     } catch (error) {
       logger.error('[TelegramBot] Scan failed', {
@@ -796,8 +786,7 @@ export class TelegramBotService {
 
     await ctx.reply(
       '🔎 What event are you looking for?\n\n' +
-      '_Example: Taylor Swift, Trail Blazers, Hamilton_',
-      { parse_mode: 'MarkdownV2' },
+      'Example: Taylor Swift, Trail Blazers, Hamilton',
     );
   }
 
@@ -823,9 +812,8 @@ export class TelegramBotService {
       }
 
       const cityTitle = city.charAt(0).toUpperCase() + city.slice(1);
-      let response =
-        `🔎 *${this.escapeMarkdown(keyword)}* in ${this.escapeMarkdown(cityTitle)} — ${result.events} Events\n` +
-        `━━━━━━━━━━━━━━━━━━━━━\n\n`;
+      let response = `🔎 "${keyword}" in ${cityTitle} — ${result.events} Events\n`;
+      response += `━━━━━━━━━━━━━━━━━━━━━\n\n`;
 
       // Build inline buttons for each event
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -842,14 +830,14 @@ export class TelegramBotService {
         const categoryIcon = this.getCategoryIcon(evt.category);
         const platformIcon = this.getPlatformIndicator(evt.platform);
         const priceLine = evt.priceRange
-          ? `💰 $${evt.priceRange.min}–$${evt.priceRange.max}`
+          ? `💰 $${evt.priceRange.min}-$${evt.priceRange.max}`
           : '💰 Price TBD';
 
         response +=
-          `${categoryIcon}${platformIcon} *${this.escapeMarkdown(evt.name)}*\n` +
-          `   📍 ${this.escapeMarkdown(evt.venue.name)}\n` +
-          `   📅 ${this.escapeMarkdown(dateStr + ', ' + timeStr)}\n` +
-          `   ${this.escapeMarkdown(priceLine)}\n\n`;
+          `${categoryIcon}${platformIcon} ${evt.name}\n` +
+          `   📍 ${evt.venue.name}\n` +
+          `   📅 ${dateStr}, ${timeStr}\n` +
+          `   ${priceLine}\n\n`;
 
         // Button label: include date to differentiate games
         const buttonLabel = `🎟️ ${dateStr} - Buy`;
@@ -869,20 +857,17 @@ export class TelegramBotService {
       }
 
       if (result.events > result.upcomingEvents.length) {
-        response += `_\\.\\.\\. and ${result.events - result.upcomingEvents.length} more events_\n\n`;
+        response += `... and ${result.events - result.upcomingEvents.length} more events\n\n`;
       }
 
-      response += `\n_Tap 🎟️ to buy, ⭐ to track${this.escapeMarkdown('!')}_`;
+      response += `\nTap 🎟️ to buy, ⭐ to track!`;
 
       // Send with inline buttons
       if (eventButtons.length > 0) {
-        await ctx.reply(response, {
-          parse_mode: 'MarkdownV2',
-          ...Markup.inlineKeyboard(eventButtons),
-        });
+        await ctx.reply(response, Markup.inlineKeyboard(eventButtons));
         await this.sendWithMainMenu(ctx, '👆 Tap an event above to see tickets');
       } else {
-        await this.sendWithMainMenu(ctx, response, { parse_mode: 'MarkdownV2' });
+        await this.sendWithMainMenu(ctx, response);
       }
     } catch (error) {
       logger.error('[TelegramBot] Search failed', {
@@ -914,25 +899,28 @@ export class TelegramBotService {
       if (userSub.paused) {
         userLine = '👤 You: ⏸️ Paused';
       } else {
-        userLine = `👤 You: ✅ Active ${this.escapeMarkdown('(')}${this.escapeMarkdown(userSub.cities.join(', '))}${this.escapeMarkdown(')')}`;
+        userLine = `👤 You: ✅ Active (${userSub.cities.join(', ')})`;
       }
     }
 
+    const pausedNote = status.pausedSubscriptions > 0
+      ? ` (${status.pausedSubscriptions} paused)`
+      : '';
+
     const msg =
-      `📡 *SeatSniper Status*\n\n` +
+      `📡 SeatSniper Status\n\n` +
       `${userLine}\n\n` +
       `Running: ${status.running ? '✅' : '❌'}\n` +
       `Tracked Events: ${status.trackedEvents}\n` +
-      `Active Subs: ${status.subscriptions}` +
-      `${status.pausedSubscriptions > 0 ? ` ${this.escapeMarkdown('(')}${status.pausedSubscriptions} paused${this.escapeMarkdown(')')}` : ''}\n` +
+      `Active Subs: ${status.subscriptions}${pausedNote}\n` +
       `Alerts Sent: ${status.alertsSent}\n\n` +
-      `*Events by Priority:*\n` +
-      `🔴 High ${this.escapeMarkdown('(<7 days)')}: ${status.eventsByPriority.high}\n` +
-      `🟡 Medium ${this.escapeMarkdown('(<30 days)')}: ${status.eventsByPriority.medium}\n` +
-      `🟢 Low ${this.escapeMarkdown('(>30 days)')}: ${status.eventsByPriority.low}\n` +
+      `Events by Priority:\n` +
+      `🔴 High (<7 days): ${status.eventsByPriority.high}\n` +
+      `🟡 Medium (<30 days): ${status.eventsByPriority.medium}\n` +
+      `🟢 Low (>30 days): ${status.eventsByPriority.low}\n` +
       `⚪ Past: ${status.eventsByPriority.past}`;
 
-    await this.sendWithMainMenu(ctx, msg, { parse_mode: 'MarkdownV2' });
+    await this.sendWithMainMenu(ctx, msg);
   }
 
   // ==========================================================================
@@ -977,7 +965,7 @@ export class TelegramBotService {
     const msg =
       `🎯 SeatSniper Help\n\n` +
       `MENU BUTTONS:\n` +
-      `📡 Scan — Quick scan a city for deals\n` +
+      `🎯 Snipe — Quick scan a city for deals\n` +
       `🔎 Search — Search events by keyword\n` +
       `⭐ Watchlist — View events you're tracking\n` +
       `🔔 Alert Me — Set up automatic alerts\n` +
@@ -985,7 +973,7 @@ export class TelegramBotService {
       `⚙️ Settings — View your preferences\n` +
       `⏸️ Pause / ▶️ Resume — Toggle alerts\n\n` +
       `HOW IT WORKS:\n` +
-      `1. 📡 Scan a city to discover events (FREE)\n` +
+      `1. 🎯 Snipe a city to discover deals (FREE)\n` +
       `2. ⭐ Watch events you're interested in\n` +
       `3. 💰 Compare Prices across platforms (~$0.03)\n` +
       `4. 🔔 Alert Me for automatic deal alerts\n\n` +
@@ -1050,15 +1038,12 @@ export class TelegramBotService {
         }
 
         const selected = session.selectedCities.length > 0
-          ? `\n\n_Selected: ${session.selectedCities.join(', ')}_`
+          ? `\n\nSelected: ${session.selectedCities.join(', ')}`
           : '';
 
         await ctx.editMessageText(
-          `🏙️ Which cities do you want to monitor?${selected}\n\n_Tap to select/deselect, then "Done" or "All Cities"\\._`,
-          {
-            parse_mode: 'MarkdownV2',
-            ...Markup.inlineKeyboard(buttons),
-          },
+          `🏙️ Which cities do you want to monitor?${selected}\n\nTap to select/deselect, then "Done" or "All Cities".`,
+          Markup.inlineKeyboard(buttons),
         );
         return;
       }
@@ -1443,18 +1428,18 @@ export class TelegramBotService {
       });
 
       const priceLine = event.priceRange
-        ? `💰 *Price Range:* $${event.priceRange.min} – $${event.priceRange.max}`
-        : '💰 *Price:* See link for current prices';
+        ? `💰 Price Range: $${event.priceRange.min} - $${event.priceRange.max}`
+        : '💰 Price: See link for current prices';
 
       const platformName = platform === 'ticketmaster' ? 'Ticketmaster' : platform;
 
-      let response = `🎟️ *${this.escapeMarkdown(event.name)}*\n`;
+      let response = `🎟️ ${event.name}\n`;
       response += `━━━━━━━━━━━━━━━━━━━━━\n\n`;
-      response += `📍 *Venue:* ${this.escapeMarkdown(event.venue.name)}\n`;
-      response += `📅 *Date:* ${this.escapeMarkdown(dateStr)}\n`;
-      response += `🕐 *Time:* ${this.escapeMarkdown(timeStr)}\n`;
+      response += `📍 Venue: ${event.venue.name}\n`;
+      response += `📅 Date: ${dateStr}\n`;
+      response += `🕐 Time: ${timeStr}\n`;
       response += `${priceLine}\n\n`;
-      response += `👆 Tap the button below to view available seats and buy tickets on ${this.escapeMarkdown(platformName)}\\!`;
+      response += `👆 Tap the button below to view available seats and buy tickets on ${platformName}!`;
 
       // Create inline button to open Ticketmaster
       const buyButton = event.url && event.url.startsWith('http')
@@ -1462,10 +1447,7 @@ export class TelegramBotService {
         : [];
 
       await ctx.answerCbQuery('Opening event details...');
-      await ctx.reply(response, {
-        parse_mode: 'MarkdownV2',
-        ...Markup.inlineKeyboard(buyButton),
-      });
+      await ctx.reply(response, Markup.inlineKeyboard(buyButton));
     } catch (error) {
       logger.error('[TelegramBot] View tickets failed', {
         platform,
@@ -1494,7 +1476,7 @@ export class TelegramBotService {
           ctx,
           '⭐ Your Watchlist\n\n' +
           'No events watched yet.\n\n' +
-          'Tap 🔍 Scan to find events, then tap ⭐ Watch to track them!',
+          'Tap 🎯 Snipe to find events, then tap ⭐ Watch to track them!',
         );
         return;
       }
