@@ -60,7 +60,7 @@ const MENU = {
   SCAN:      '📡 Scan',
   SEARCH:    '🔎 Search',
   WATCHLIST: '⭐ Watchlist',
-  SUBSCRIBE: '📬 Subscribe',
+  SUBSCRIBE: '🔔 Alert Me',
   STATUS:    '📊 Status',
   SETTINGS:  '⚙️ Settings',
   PAUSE:     '⏸️ Pause Alerts',
@@ -462,17 +462,15 @@ export class TelegramBotService {
     if (!chatId) return;
 
     const welcome =
-      `🎯 *Welcome to SeatSniper\\!*\n\n` +
-      `I find the best\\-value tickets across StubHub, Ticketmaster, and SeatGeek — ` +
-      `then alert you with seat map images so you know exactly where you'll sit\\.\n\n` +
-      `*Get Started:*\n` +
-      `🔍 *Scan* — Quick scan for deals in a city\n` +
-      `📋 *Subscribe* — Set up automatic deal alerts\n` +
-      `📊 *Status* — Check monitoring activity\n` +
-      `⚙️ *Settings* — View your preferences\n\n` +
-      `_Tap a button below to begin 👇_`;
+      `🎯 Welcome to SeatSniper!\n\n` +
+      `I find the best-value tickets across multiple platforms and alert you when great deals appear.\n\n` +
+      `GET STARTED:\n` +
+      `📡 Scan — Quick scan for deals in a city\n` +
+      `🔔 Alert Me — Set up automatic deal alerts\n` +
+      `⭐ Watchlist — Track specific events\n\n` +
+      `Tap a button below to begin 👇`;
 
-    await this.sendWithMainMenu(ctx, welcome, { parse_mode: 'MarkdownV2' });
+    await this.sendWithMainMenu(ctx, welcome);
   }
 
   // ==========================================================================
@@ -523,8 +521,8 @@ export class TelegramBotService {
     buttons.push([Markup.button.callback('📍 All Cities', 'city:all')]);
 
     await ctx.reply(
-      `📬 Subscribe to Deal Alerts\n\n` +
-      `🏙️ Which cities do you want to monitor?`,
+      `🔔 Set Up Alerts\n\n` +
+      `🏙️ Which cities do you want alerts for?`,
       Markup.inlineKeyboard(buttons),
     );
   }
@@ -540,7 +538,7 @@ export class TelegramBotService {
     // Check if they even have a subscription
     const subs = this.monitor.getSubscriptions().filter(s => s.userId === chatId);
     if (subs.length === 0) {
-      await this.sendWithMainMenu(ctx, 'You don\'t have an active subscription. Tap 📋 Subscribe to set one up.');
+      await this.sendWithMainMenu(ctx, 'You don\'t have alerts set up. Tap 🔔 Alert Me to get started.');
       return;
     }
 
@@ -572,7 +570,7 @@ export class TelegramBotService {
 
     const paused = this.monitor.pauseSubscription(chatId);
     if (!paused) {
-      await this.sendWithMainMenu(ctx, 'No active subscription to pause. Tap 📋 Subscribe to set one up.');
+      await this.sendWithMainMenu(ctx, 'No active alerts to pause. Tap 🔔 Alert Me to set them up.');
       return;
     }
 
@@ -605,7 +603,7 @@ export class TelegramBotService {
 
     const resumed = this.monitor.resumeSubscription(chatId);
     if (!resumed) {
-      await this.sendWithMainMenu(ctx, 'No paused subscription found. Tap 📋 Subscribe to set one up.');
+      await this.sendWithMainMenu(ctx, 'No paused alerts found. Tap 🔔 Alert Me to set them up.');
       return;
     }
 
@@ -758,7 +756,7 @@ export class TelegramBotService {
         }
       }
 
-      response += `\n_Tap 🎟️ to see available tickets, or 📋 Subscribe for alerts${this.escapeMarkdown('!')}_`;
+      response += `\n_Tap 🎟️ to buy, ⭐ to track, or 🔔 Alert Me for deals${this.escapeMarkdown('!')}_`;
 
       // Send with inline buttons if we have events
       if (eventButtons.length > 0) {
@@ -947,7 +945,7 @@ export class TelegramBotService {
     const subs = this.monitor.getSubscriptions().filter(s => s.userId === chatId);
 
     if (subs.length === 0) {
-      await this.sendWithMainMenu(ctx, 'No active subscriptions. Tap 📋 Subscribe to set one up.');
+      await this.sendWithMainMenu(ctx, 'No alerts set up yet. Tap 🔔 Alert Me to get started.');
       return;
     }
 
@@ -965,7 +963,7 @@ export class TelegramBotService {
       `${budgetLine}\n` +
       `📡 Channel: ${sub.channel}\n` +
       `${statusLine}\n\n` +
-      `Tap 📋 Subscribe to change, ⏸️ Pause to mute, or /unsub to remove.`;
+      `Tap 🔔 Alert Me to change, ⏸️ Pause to mute, or /unsub to remove.`;
 
     await this.sendWithMainMenu(ctx, msg);
   }
@@ -978,18 +976,18 @@ export class TelegramBotService {
     const msg =
       `🎯 SeatSniper Help\n\n` +
       `MENU BUTTONS:\n` +
-      `🔍 Scan — Quick scan a city for deals\n` +
+      `📡 Scan — Quick scan a city for deals\n` +
       `🔎 Search — Search events by keyword\n` +
       `⭐ Watchlist — View events you're tracking\n` +
-      `📋 Subscribe — Set up automatic alerts\n` +
+      `🔔 Alert Me — Set up automatic alerts\n` +
       `📊 Status — Check monitoring activity\n` +
       `⚙️ Settings — View your preferences\n` +
       `⏸️ Pause / ▶️ Resume — Toggle alerts\n\n` +
       `HOW IT WORKS:\n` +
-      `1. 🔍 Scan a city to discover events (FREE)\n` +
+      `1. 📡 Scan a city to discover events (FREE)\n` +
       `2. ⭐ Watch events you're interested in\n` +
       `3. 💰 Compare Prices across platforms (~$0.03)\n` +
-      `4. 📋 Subscribe for automatic deal alerts\n\n` +
+      `4. 🔔 Alert Me for automatic deal alerts\n\n` +
       `ON EACH ALERT:\n` +
       `   🔕 Mute that event\n` +
       `   🔄 Refresh prices\n\n` +
@@ -1246,7 +1244,7 @@ export class TelegramBotService {
       await ctx.editMessageText(
         '✅ Subscription removed. You will no longer receive alerts.',
       );
-      await this.sendWithMainMenu(ctx, 'Tap 📋 Subscribe to set up again anytime.');
+      await this.sendWithMainMenu(ctx, 'Tap 🔔 Alert Me to set up again anytime.');
       return;
     }
 
